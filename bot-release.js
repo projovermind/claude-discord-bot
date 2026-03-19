@@ -728,21 +728,22 @@ async function handleClaude(message, content) {
 
     if (result2) {
       const { parsed: pj, before, after } = result2;
-      // JSON 앞에 텍스트가 있으면 먼저 전송
-      if (before) await sendResponseWithFiles(message, before);
-      // JSON의 message 전송
-      if (pj.message) await sendResponseWithFiles(message, pj.message);
-      // 액션 실행
-      if (pj.actions?.length > 0) await executeActions(message, pj.actions);
-      // 위임
+
+      // 위임이 있으면 위임 메시지만 보내고 끝
       if (pj.delegate) {
         const { agent: targetId, task } = pj.delegate;
+        if (pj.message) await sendResponseWithFiles(message, pj.message);
         if (targetId && task) {
           const src = getAgentForChannel(channelId);
           await delegateToAgent(src?.name || agentLabel, targetId, task, message);
         }
+        return;  // 위임 후 즉시 종료 — 추가 응답 없음
       }
-      // JSON 뒤에 텍스트가 있으면 전송
+
+      // 일반 JSON 처리 (위임 없는 경우)
+      if (before) await sendResponseWithFiles(message, before);
+      if (pj.message) await sendResponseWithFiles(message, pj.message);
+      if (pj.actions?.length > 0) await executeActions(message, pj.actions);
       if (after) await sendResponseWithFiles(message, after);
     } else {
       await sendResponseWithFiles(message, rawResponse);
