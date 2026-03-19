@@ -298,8 +298,9 @@ const DISCORD_ACTIONS_PROMPT = `
 
 ## 에이전트 위임 (다른 에이전트에게 작업 넘기기)
 작업이 다른 에이전트의 전문 영역이면, 아래 JSON으로 위임하세요:
-{"message": "사용자 응답", "delegate": {"agent": "에이전트ID", "task": "위임할 작업 설명"}}
-예: 데이터 분석 요청이 데이터-소스 에이전트에게 적합하면 → {"message": "데이터 분석을 전담 에이전트에게 위임합니다.", "delegate": {"agent": "data_source", "task": "AAPL의 최근 30일 가격 데이터를 분석해줘"}}
+단일 위임: {"message": "사용자 응답", "delegate": {"agent": "에이전트ID", "task": "위임할 작업 설명"}}
+복수 동시 위임: {"message": "사용자 응답", "delegates": [{"agent": "에이전트ID1", "task": "작업1"}, {"agent": "에이전트ID2", "task": "작업2"}]}
+여러 에이전트에게 동시에 작업을 맡길 때는 delegates 배열을 사용하세요. 모든 위임은 병렬로 실행됩니다.
 
 파일을 전송해야 할 경우, 응답 텍스트 안에 [[FILE:/절대/경로/파일명]] 패턴을 포함하세요.
 예: 리포트를 작성했습니다. [[FILE:/tmp/report.txt]]
@@ -732,20 +733,25 @@ async function handleClaude(message, content) {
     if (result2) {
       const { parsed: pj, before, after } = result2;
 
-      // 위임이 있으면: 답변 먼저 → 라우터 정리 → 위임 실행
-      if (pj.delegate) {
-        const { agent: targetId, task } = pj.delegate;
+      // 위임 처리 (단일: delegate, 복수: delegates)
+      const delegations = pj.delegates
+        ? pj.delegates
+        : pj.delegate
+          ? [pj.delegate]
+          : null;
 
+      if (delegations && delegations.length > 0) {
         // ① 답변 먼저 (사용자에게 즉시 보여줌)
-        const delegateMsg = pj.message || before || `${targetId} 에이전트에게 위임합니다.`;
-        console.log(`🤝 위임 답변 전송: ${delegateMsg.slice(0, 80)}`);
+        const targetNames = delegations.map(d => d.agent).join(', ');
+        const delegateMsg = pj.message || before || `${targetNames} 에이전트에게 위임합니다.`;
+        console.log(`🤝 위임 답변 전송 (${delegations.length}건): ${delegateMsg.slice(0, 80)}`);
         try {
           await message.reply(delegateMsg);
         } catch (e) {
           console.log(`⚠️ 위임 답변 전송 실패: ${e.message}`);
         }
 
-        // ② 라우터 즉시 정리 (타이핑, 진행 임베드 중지)
+        // ② 라우터 즉시 정리
         clearInterval(typingInterval);
         clearInterval(progressInterval);
         activeRequests.delete(channelId);
@@ -754,19 +760,22 @@ async function handleClaude(message, content) {
         // ③ 라우터 진행 임베드 → 완료
         if (progressMsg) {
           try {
+            const delegateDesc = delegations.map(d => `🤝 → ${d.agent}`).join('\n');
             await progressMsg.edit({ embeds: [{
               color: 0x22C55E,
               author: { name: `${agentLabel} 위임 완료` },
-              description: `🤝 → ${targetId} 에이전트에게 위임`,
+              description: `${delegateDesc}\n📊 ${delegations.length}개 에이전트 동시 위임`,
               footer: { text: `⏱️ ${timeStr} 소요` },
             }] });
           } catch {}
         }
 
-        // ④ 위임 실행 (백그라운드 — 라우터는 여기서 끝)
-        if (targetId && task) {
-          const src = getAgentForChannel(channelId);
-          delegateToAgent(src?.name || agentLabel, targetId, task, message);
+        // ④ 모든 위임 동시 실행 (병렬 — 라우터는 여기서 끝)
+        const src = getAgentForChannel(channelId);
+        for (const d of delegations) {
+          if (d.agent && d.task) {
+            delegateToAgent(src?.name || agentLabel, d.agent, d.task, message);
+          }
         }
         return;
       }
