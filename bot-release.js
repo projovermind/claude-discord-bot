@@ -1041,9 +1041,9 @@ async function handleProjectCommand(message, content) {
     if (Object.keys(projects).length === 0) {
       // 자동 분류 표시
       const allAgents = Object.keys(config.agents || {}).filter(id => id !== 'default');
-      const ccCount = allAgents.filter(id => id.startsWith('cc_')).length;
+      // 프로젝트 분류는 config.json의 projects 필드로 관리
       const omCount = allAgents.length - ccCount;
-      return message.reply(`📁 등록된 프로젝트 없음 (자동 분류 중)\n🧠 Overmind: ${omCount}개 에이전트\n🎬 Command Center: ${ccCount}개 에이전트`);
+      return message.reply(`📁 등록된 프로젝트 없음. config.json에 projects를 설정하세요.`);
     }
     const lines = Object.entries(projects).map(([id, p]) => {
       const agentCount = (p.agents || []).length;
@@ -1248,7 +1248,7 @@ async function handleHookCommand(message, content) {
 // ── OAuth 인증 상태 관리 ──
 let _authFailed = false;           // 현재 인증 실패 상태
 let _authFailNotified = false;     // 알림 전송 여부 (중복 알림 방지)
-const AUTH_ALERT_CHANNEL = '1475759262239293481'; // 인증 알림 채널 (하이브마인드)
+const AUTH_ALERT_CHANNEL = null; // 인증 알림 채널 (config.json의 guildId 기반으로 자동 탐지)
 
 function isAuthError(output, stderrOutput) {
   const combined = (output + ' ' + stderrOutput).toLowerCase();
@@ -1843,8 +1843,8 @@ if (SESSION_TTL > 0) {
 // ─────────────────────────────────────────
 // config.json에 projects 필드로 프로젝트별 에이전트 그룹핑:
 // "projects": {
-//   "overmind": { "name": "Project Overmind", "emoji": "🧠", "agents": ["overmind","router",...] },
-//   "commandcenter": { "name": "Command Center", "emoji": "🎬", "agents": ["cc_video",...] }
+//   "myproject": { "name": "My Project", "emoji": "🧠", "agents": ["overmind","router",...] },
+//   "another": { "name": "Another Project", "emoji": "🔧", "agents": ["agent1",...] }
 // }
 // projects가 없으면 전체 에이전트를 하나의 대시보드로 표시
 
@@ -2149,13 +2149,13 @@ async function checkForUpdates() {
     const updatePath = path.join(__dirname, '.bot-update.js');
     fs.writeFileSync(updatePath, remoteCode);
 
-    // 하이브마인드 또는 첫 번째 채널에 승인 요청
+    // 첫 번째 텍스트 채널에 승인 요청
     const guild = client.guilds.cache.first();
     if (!guild) return;
 
     const notifyChannel = guild.channels.cache.find(
-      ch => ch.name.includes('하이브마인드') || ch.name.includes('hivemind')
-    ) || guild.channels.cache.find(ch => ch.type === ChannelType.GuildText);
+      ch => ch.type === ChannelType.GuildText
+    );
 
     if (notifyChannel) {
       const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
