@@ -2015,6 +2015,17 @@ function buildProjectEmbed(projId, proj, config) {
       if (q) queueCount += q.length;
     }
 
+    // 위임 작업 감지 (delegate_에이전트ID_timestamp 형태)
+    if (!isWorking) {
+      for (const [key, proc] of activeProcesses) {
+        if (key.startsWith(`delegate_${agentId}_`)) {
+          isWorking = true;
+          if (proc.currentTool) toolInfo = proc.currentTool;
+          break;
+        }
+      }
+    }
+
     if (isWorking) activeCount++;
     else idleCount++;
 
@@ -2309,18 +2320,59 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
 
   const systemPrompt = targetAgent.systemPrompt + '\n\n' + DISCORD_ACTIONS_PROMPT;
 
+  // 위임받은 에이전트의 바인딩 채널 찾기
+  const config2 = loadConfig();
+  const bindings = config2.channelBindings || {};
+  let targetChannelId = null;
+  for (const [chId, agId] of Object.entries(bindings)) {
+    if (agId === targetAgentId) { targetChannelId = chId; break; }
+  }
+
+  const guild = originalMessage.guild;
+  const targetChannel = targetChannelId ? guild.channels.cache.get(targetChannelId) : null;
+
+  // 대시보드에 위임 에이전트 표시
+  const delegateKey = `delegate_${targetAgentId}_${Date.now()}`;
+  activeRequests.add(delegateKey);
+  activeProcesses.set(delegateKey, {
+    proc: null,
+    agentLabel: `${targetAgent.avatar || '🤖'} ${targetAgent.name}`,
+    currentTool: '🤝 위임 작업 수행중...',
+    agentId: targetAgentId,
+  });
+  updateDashboard();
+
   try {
-    const result = await _runClaudeOnce(task, systemPrompt, targetAgent);
+    const onToolUse = (toolName, input) => {
+      const proc = activeProcesses.get(delegateKey);
+      if (proc) {
+        const detail = input?.file_path?.split('/').pop() || input?.command?.slice(0, 30) || '';
+        proc.currentTool = `${toolName}${detail ? ': ' + detail : ''}`;
+      }
+    };
+
+    // 위임받은 채널에 시작 알림
+    if (targetChannel) {
+      await targetChannel.send({
+        embeds: [{
+          color: 0x8B5CF6,
+          description: `🤝 **${sourceAgent}**로부터 위임받은 작업:\n\`${task.slice(0, 200)}\``,
+        }],
+      });
+    }
+
+    const result = await _runClaudeOnce(task, systemPrompt, targetAgent, null, onToolUse);
     if (result.text) {
-      // 위임 결과 전송
       const lines = result.text.length > 1500
         ? result.text.slice(0, 1500) + '\n... (생략됨)'
         : result.text;
 
-      await originalMessage.channel.send({
+      // 위임받은 에이전트의 채널에서 답변
+      const replyChannel = targetChannel || originalMessage.channel;
+      await replyChannel.send({
         embeds: [{
           color: 0x8B5CF6,
-          author: { name: `${targetAgent.avatar || '🤖'} ${targetAgent.name} (위임 결과)` },
+          author: { name: `${targetAgent.avatar || '🤖'} ${targetAgent.name}` },
           description: lines,
         }],
       });
@@ -2328,8 +2380,15 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     return result;
   } catch (err) {
     console.error(`❌ 위임 실패 [${targetAgent.name}]:`, err.message);
-    await originalMessage.channel.send(`❌ ${targetAgent.name}에게 위임 실패: ${err.message}`);
+    const errChannel = targetChannel || originalMessage.channel;
+    await errChannel.send(`❌ ${targetAgent.name} 위임 실패: ${err.message}`);
     return null;
+  } finally {
+    activeRequests.delete(delegateKey);
+    activeProcesses.delete(delegateKey);
+    totalProcessed++;
+    taskHistory.push({ timestamp: Date.now(), durationMs: 0 });
+    updateDashboard();
   }
 }
 
