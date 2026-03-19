@@ -714,19 +714,26 @@ async function handleClaude(message, content) {
     const delegated = await handleDelegation(rawResponse, message);
     if (delegated) return;  // 위임 처리 완료
 
-    const parsed = tryParseJSON(rawResponse);
+    const result2 = tryParseJSON(rawResponse);
 
-    if (parsed) {
-      if (parsed.message) await sendResponseWithFiles(message, parsed.message);
-      if (parsed.actions?.length > 0) await executeActions(message, parsed.actions);
-      // delegate가 actions와 함께 올 수도 있음
-      if (parsed.delegate) {
-        const { agent: targetId, task } = parsed.delegate;
+    if (result2) {
+      const { parsed: pj, before, after } = result2;
+      // JSON 앞에 텍스트가 있으면 먼저 전송
+      if (before) await sendResponseWithFiles(message, before);
+      // JSON의 message 전송
+      if (pj.message) await sendResponseWithFiles(message, pj.message);
+      // 액션 실행
+      if (pj.actions?.length > 0) await executeActions(message, pj.actions);
+      // 위임
+      if (pj.delegate) {
+        const { agent: targetId, task } = pj.delegate;
         if (targetId && task) {
           const src = getAgentForChannel(channelId);
           await delegateToAgent(src?.name || agentLabel, targetId, task, message);
         }
       }
+      // JSON 뒤에 텍스트가 있으면 전송
+      if (after) await sendResponseWithFiles(message, after);
     } else {
       await sendResponseWithFiles(message, rawResponse);
     }
@@ -1041,9 +1048,9 @@ async function handleProjectCommand(message, content) {
     if (Object.keys(projects).length === 0) {
       // 자동 분류 표시
       const allAgents = Object.keys(config.agents || {}).filter(id => id !== 'default');
-      // 프로젝트 분류는 config.json의 projects 필드로 관리
+      const ccCount = allAgents.filter(id => id.startsWith('cc_')).length;
       const omCount = allAgents.length - ccCount;
-      return message.reply(`📁 등록된 프로젝트 없음. config.json에 projects를 설정하세요.`);
+      return message.reply(`📁 등록된 프로젝트 없음 (자동 분류 중)\n🧠 Overmind: ${omCount}개 에이전트\n🎬 Command Center: ${ccCount}개 에이전트`);
     }
     const lines = Object.entries(projects).map(([id, p]) => {
       const agentCount = (p.agents || []).length;
@@ -1248,7 +1255,7 @@ async function handleHookCommand(message, content) {
 // ── OAuth 인증 상태 관리 ──
 let _authFailed = false;           // 현재 인증 실패 상태
 let _authFailNotified = false;     // 알림 전송 여부 (중복 알림 방지)
-const AUTH_ALERT_CHANNEL = null; // 인증 알림 채널 (config.json의 guildId 기반으로 자동 탐지)
+const AUTH_ALERT_CHANNEL = null; // 인증 알림 채널 (하이브마인드)
 
 function isAuthError(output, stderrOutput) {
   const combined = (output + ' ' + stderrOutput).toLowerCase();
@@ -1652,14 +1659,41 @@ setInterval(async () => {
 
 // JSON 파싱 시도
 function tryParseJSON(raw) {
+  // 1차: 전체가 JSON인 경우
   try {
     const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const parsed = JSON.parse(cleaned);
-    if (parsed.message || parsed.actions) return parsed;
+    if (parsed.message || parsed.actions || parsed.delegate) return { parsed, before: '', after: '' };
     return null;
-  } catch {
-    return null;
+  } catch {}
+
+  // 2차: 텍스트 안에 JSON이 섞여있는 경우 → { 로 시작하는 부분 찾기
+  const jsonStart = raw.indexOf('{"');
+  if (jsonStart === -1) return null;
+
+  // JSON 끝 찾기: 중괄호 매칭
+  let depth = 0;
+  let jsonEnd = -1;
+  for (let i = jsonStart; i < raw.length; i++) {
+    if (raw[i] === '{') depth++;
+    else if (raw[i] === '}') {
+      depth--;
+      if (depth === 0) { jsonEnd = i + 1; break; }
+    }
   }
+  if (jsonEnd === -1) return null;
+
+  try {
+    const jsonStr = raw.slice(jsonStart, jsonEnd);
+    const parsed = JSON.parse(jsonStr);
+    if (parsed.message || parsed.actions || parsed.delegate) {
+      const before = raw.slice(0, jsonStart).trim();
+      const after = raw.slice(jsonEnd).trim();
+      return { parsed, before, after };
+    }
+  } catch {}
+
+  return null;
 }
 
 // ─────────────────────────────────────────
@@ -1843,8 +1877,8 @@ if (SESSION_TTL > 0) {
 // ─────────────────────────────────────────
 // config.json에 projects 필드로 프로젝트별 에이전트 그룹핑:
 // "projects": {
-//   "myproject": { "name": "My Project", "emoji": "🧠", "agents": ["overmind","router",...] },
-//   "another": { "name": "Another Project", "emoji": "🔧", "agents": ["agent1",...] }
+//   "overmind": { "name": "Project Overmind", "emoji": "🧠", "agents": ["overmind","router",...] },
+//   "commandcenter": { "name": "Command Center", "emoji": "🎬", "agents": ["cc_video",...] }
 // }
 // projects가 없으면 전체 에이전트를 하나의 대시보드로 표시
 
@@ -2149,13 +2183,13 @@ async function checkForUpdates() {
     const updatePath = path.join(__dirname, '.bot-update.js');
     fs.writeFileSync(updatePath, remoteCode);
 
-    // 첫 번째 텍스트 채널에 승인 요청
+    // 하이브마인드 또는 첫 번째 채널에 승인 요청
     const guild = client.guilds.cache.first();
     if (!guild) return;
 
     const notifyChannel = guild.channels.cache.find(
-      ch => ch.type === ChannelType.GuildText
-    );
+      ch => ch.name.includes('하이브마인드') || ch.name.includes('hivemind')
+    ) || guild.channels.cache.find(ch => ch.type === ChannelType.GuildText);
 
     if (notifyChannel) {
       const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
