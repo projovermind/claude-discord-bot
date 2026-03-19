@@ -1397,15 +1397,21 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
 
     // 허용 도구 설정
     if (agent.allowedTools && agent.allowedTools.length > 0) {
-      args.push('--allowedTools', agent.allowedTools.join(','));
+      args.push('--allowedTools', ...agent.allowedTools);
     }
 
     // 🛡️ 위험 명령 차단 (봇 프로세스 kill 방지)
-    args.push('--disallowedTools',
+    const disallowed = [
       'Bash(kill:*)', 'Bash(pkill:*)', 'Bash(pgrep:*)',
       'Bash(killall:*)', 'Bash(launchctl:*)',
       'Bash(rm -rf /Volumes:*)', 'Bash(rm -rf ~:*)'
-    );
+    ];
+
+    // 에이전트별 차단 도구 (config.json의 disallowedTools)
+    if (agent.disallowedTools && agent.disallowedTools.length > 0) {
+      disallowed.push(...agent.disallowedTools);
+    }
+    args.push('--disallowedTools', ...disallowed);
 
     // 모델 설정 (에이전트별 모델 지정 가능, 기본: opus)
     const model = agent.model || 'opus';
