@@ -1423,6 +1423,7 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
     const cwd = agent.workingDir || process.cwd();
 
     console.log(`🚀 Claude 호출: agent=${agent.name || 'default'} cwd=${cwd} session=${sessionId ? sessionId.slice(0, 8) + '...' : 'new'} format=${useStream ? 'stream' : 'json'}`);
+    console.log(`  📋 args: ${args.filter(a => a.startsWith('--')).join(' ')}`);
 
     const proc = spawn(CLAUDE_BIN, args, {
       env: cleanEnv,
@@ -2316,21 +2317,11 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     return null;
   }
 
+  const agentLabel = `${targetAgent.avatar || '🤖'} ${targetAgent.name}`;
   console.log(`🤝 [${sourceAgent}] → [${targetAgent.name}] 위임: ${task.slice(0, 50)}...`);
 
-  // 위임 알림
-  await originalMessage.channel.send({
-    embeds: [{
-      color: 0x8B5CF6,
-      description: `🤝 **${sourceAgent}** → **${targetAgent.name}**에게 작업 위임\n\`${task.slice(0, 100)}\``,
-    }],
-  });
-
-  const systemPrompt = targetAgent.systemPrompt + '\n\n' + DISCORD_ACTIONS_PROMPT;
-
   // 위임받은 에이전트의 바인딩 채널 찾기
-  const config2 = loadConfig();
-  const bindings = config2.channelBindings || {};
+  const bindings = config.channelBindings || {};
   let targetChannelId = null;
   for (const [chId, agId] of Object.entries(bindings)) {
     if (agId === targetAgentId) { targetChannelId = chId; break; }
@@ -2338,64 +2329,155 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
 
   const guild = originalMessage.guild;
   const targetChannel = targetChannelId ? guild.channels.cache.get(targetChannelId) : null;
+  const workChannel = targetChannel || originalMessage.channel;
 
-  // 대시보드에 위임 에이전트 표시
-  const delegateKey = `delegate_${targetAgentId}_${Date.now()}`;
+  // 대시보드에 위임 에이전트 표시 (채널ID 기반으로 등록해야 대시보드에서 감지)
+  const delegateKey = targetChannelId || `delegate_${targetAgentId}_${Date.now()}`;
   activeRequests.add(delegateKey);
   activeProcesses.set(delegateKey, {
     proc: null,
-    agentLabel: `${targetAgent.avatar || '🤖'} ${targetAgent.name}`,
-    currentTool: '🤝 위임 작업 수행중...',
+    agentLabel,
+    currentTool: '🤝 요청 분석 중...',
     agentId: targetAgentId,
   });
   updateDashboard();
 
+  const startTime = Date.now();
+  const toolSteps = [];
+  const TOOL_ICONS_D = {
+    Read: '📖', Write: '📝', Edit: '✏️', Bash: '💻',
+    Grep: '🔎', Glob: '📂', Agent: '🤖', WebSearch: '🌐',
+  };
+
+  // 위임받은 채널에 진행 임베드 표시
+  let progressMsg = null;
+  try {
+    progressMsg = await workChannel.send({
+      embeds: [{
+        color: 0x8B5CF6,
+        author: { name: `${agentLabel} 작업 중...` },
+        description: `🤝 **${sourceAgent}**로부터 위임받은 작업\n🔍 분석 중... (도구 0회 사용)\n\n\`${task.slice(0, 150)}\``,
+        footer: { text: '⏱️ 0초 경과' },
+      }],
+    });
+  } catch {}
+
+  // 진행 메시지 업데이트 타이머
+  let lastEditTime = 0;
+  const progressInterval = setInterval(async () => {
+    if (!progressMsg) return;
+    const now = Date.now();
+    if (now - lastEditTime < 2500) return;
+    lastEditTime = now;
+
+    const elapsed = Math.round((now - startTime) / 1000);
+    const min = Math.floor(elapsed / 60);
+    const sec = elapsed % 60;
+    const timeStr = min > 0 ? `${min}분 ${sec}초` : `${sec}초`;
+
+    // 최근 5개 도구만 표시
+    const recent = toolSteps.slice(-5);
+    const toolLines = recent.map(s => `└─ ${s.icon} ${s.tool}${s.detail ? ': ' + s.detail : ''}`).join('\n');
+    const older = toolSteps.length > 5 ? `... +${toolSteps.length - 5}개 이전 작업\n` : '';
+
+    try {
+      await progressMsg.edit({
+        embeds: [{
+          color: 0x8B5CF6,
+          author: { name: `${agentLabel} 작업 중...` },
+          description: `🔧 작업 진행 중... (도구 ${toolSteps.length}회 사용)\n\n\`\`\`\n${older}${toolLines || '분석 중...'}\n\`\`\``,
+          footer: { text: `⏱️ ${timeStr} 경과` },
+        }],
+      });
+    } catch {}
+  }, 3000);
+
+  const systemPrompt = targetAgent.systemPrompt + '\n\n' + DISCORD_ACTIONS_PROMPT;
+
   try {
     const onToolUse = (toolName, input) => {
+      const icon = TOOL_ICONS_D[toolName] || '⚙️';
+      let detail = '';
+      if (input?.file_path) detail = input.file_path.split('/').slice(-2).join('/');
+      else if (input?.command) detail = input.command.length > 40 ? input.command.slice(0, 37) + '...' : input.command;
+      else if (input?.pattern) detail = `"${input.pattern}"`;
+
+      toolSteps.push({ icon, tool: toolName, detail });
+
       const proc = activeProcesses.get(delegateKey);
-      if (proc) {
-        const detail = input?.file_path?.split('/').pop() || input?.command?.slice(0, 30) || '';
-        proc.currentTool = `${toolName}${detail ? ': ' + detail : ''}`;
-      }
+      if (proc) proc.currentTool = `${icon} ${toolName}${detail ? ': ' + detail.slice(0, 25) : ''}`;
     };
 
-    // 위임받은 채널에 시작 알림
-    if (targetChannel) {
-      await targetChannel.send({
-        embeds: [{
-          color: 0x8B5CF6,
-          description: `🤝 **${sourceAgent}**로부터 위임받은 작업:\n\`${task.slice(0, 200)}\``,
-        }],
-      });
+    const onProcSpawn = (proc) => {
+      const entry = activeProcesses.get(delegateKey);
+      if (entry) entry.proc = proc;
+    };
+
+    // 타이핑 표시
+    workChannel.sendTyping().catch(() => {});
+    const typingInterval = setInterval(() => {
+      workChannel.sendTyping().catch(() => {});
+    }, 5000);
+
+    const result = await _runClaudeOnce(task, systemPrompt, targetAgent, null, onToolUse, onProcSpawn);
+
+    clearInterval(typingInterval);
+
+    // 완료 임베드
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    const min = Math.floor(elapsed / 60);
+    const sec = elapsed % 60;
+    const timeStr = min > 0 ? `${min}분 ${sec}초` : `${sec}초`;
+
+    if (progressMsg) {
+      try {
+        const completionDesc = [];
+        if (toolSteps.length > 0) {
+          completionDesc.push(`✅ 도구 ${toolSteps.length}회 사용하여 완료`);
+          const toolCounts = {};
+          for (const s of toolSteps) toolCounts[s.tool] = (toolCounts[s.tool] || 0) + 1;
+          completionDesc.push(Object.entries(toolCounts).map(([t, c]) => `${TOOL_ICONS_D[t] || '⚙️'} ${t} ×${c}`).join('  '));
+        } else {
+          completionDesc.push('✅ 완료');
+        }
+        await progressMsg.edit({
+          embeds: [{
+            color: 0x22C55E,
+            author: { name: `${agentLabel} 작업 완료` },
+            description: completionDesc.join('\n'),
+            footer: { text: `⏱️ ${timeStr} 소요` },
+          }],
+        });
+      } catch {}
     }
 
-    const result = await _runClaudeOnce(task, systemPrompt, targetAgent, null, onToolUse);
+    // 결과 텍스트 전송
     if (result.text) {
-      const lines = result.text.length > 1500
-        ? result.text.slice(0, 1500) + '\n... (생략됨)'
-        : result.text;
-
-      // 위임받은 에이전트의 채널에서 답변
-      const replyChannel = targetChannel || originalMessage.channel;
-      await replyChannel.send({
-        embeds: [{
-          color: 0x8B5CF6,
-          author: { name: `${targetAgent.avatar || '🤖'} ${targetAgent.name}` },
-          description: lines,
-        }],
-      });
+      await sendResponseWithFiles({ channel: workChannel, reply: (c) => workChannel.send(c) }, result.text);
     }
     return result;
   } catch (err) {
     console.error(`❌ 위임 실패 [${targetAgent.name}]:`, err.message);
-    const errChannel = targetChannel || originalMessage.channel;
-    await errChannel.send(`❌ ${targetAgent.name} 위임 실패: ${err.message}`);
+    if (progressMsg) {
+      try {
+        await progressMsg.edit({
+          embeds: [{
+            color: 0xEF4444,
+            author: { name: `${agentLabel} 오류 발생` },
+            description: `❌ ${err.message}`,
+          }],
+        });
+      } catch {}
+    }
+    await workChannel.send(`❌ ${targetAgent.name} 위임 실패: ${err.message}`);
     return null;
   } finally {
+    clearInterval(progressInterval);
     activeRequests.delete(delegateKey);
     activeProcesses.delete(delegateKey);
     totalProcessed++;
-    taskHistory.push({ timestamp: Date.now(), durationMs: 0 });
+    const durationMs = Date.now() - startTime;
+    taskHistory.push({ timestamp: Date.now(), durationMs });
     updateDashboard();
   }
 }
