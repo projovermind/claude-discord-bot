@@ -306,10 +306,12 @@ const DISCORD_ACTIONS_PROMPT = `
 
 ## 중요 행동 규칙
 - 사용자가 무언가를 요청하면 **확인 질문 없이 바로 실행**하세요.
-- "확인하고 싶은 부분이 있습니다" 같은 애매한 말을 하지 마세요. 바로 작업하세요.
-- 만약 정말 결정이 필요한 부분이 있다면, 구체적인 선택지를 명확히 제시하세요.
+- "확인하고 싶은 부분이 있습니다", "어떤 작업에 대해 물어보시는 건가요?" 같은 **되묻는 질문을 절대 하지 마세요.** 세션 컨텍스트를 확인하고 스스로 판단해서 답하세요.
+- 계획(플랜)만 세우지 마세요. **계획을 세웠으면 바로 실행까지 완료**하세요.
+- Plan 모드로 진입하지 마세요. 바로 구현하세요.
 - 작업이 끝나면 반드시 **무엇을 했고, 결과가 무엇인지** 구체적으로 알려주세요.
 - "작업을 완료했습니다"만 말하지 말고, 핵심 내용을 요약해서 보여주세요.
+- 작업 결과에는 반드시: 수정한 파일 목록, 변경 내용 요약, 테스트 결과(있으면)를 포함하세요.
 
 ## 절대 하지 말아야 할 것
 - **절대로 봇 자체의 프로세스를 관리하지 마세요** (pgrep, pkill, kill, ps 등으로 node/bot.js 프로세스를 조회/종료 금지)
@@ -729,17 +731,26 @@ async function handleClaude(message, content) {
     if (result2) {
       const { parsed: pj, before, after } = result2;
 
-      // 위임이 있으면 라우터 즉시 정리 → 위임 메시지 → 위임 실행
+      // 위임이 있으면: 답변 먼저 → 라우터 정리 → 위임 실행
       if (pj.delegate) {
         const { agent: targetId, task } = pj.delegate;
 
-        // 라우터 즉시 정리 (타이핑, 진행 임베드 중지)
+        // ① 답변 먼저 (사용자에게 즉시 보여줌)
+        const delegateMsg = pj.message || before || `${targetId} 에이전트에게 위임합니다.`;
+        console.log(`🤝 위임 답변 전송: ${delegateMsg.slice(0, 80)}`);
+        try {
+          await message.reply(delegateMsg);
+        } catch (e) {
+          console.log(`⚠️ 위임 답변 전송 실패: ${e.message}`);
+        }
+
+        // ② 라우터 즉시 정리 (타이핑, 진행 임베드 중지)
         clearInterval(typingInterval);
         clearInterval(progressInterval);
         activeRequests.delete(channelId);
         activeProcesses.delete(channelId);
 
-        // 라우터 진행 임베드 → 완료로 업데이트
+        // ③ 라우터 진행 임베드 → 완료
         if (progressMsg) {
           try {
             await progressMsg.edit({ embeds: [{
@@ -751,14 +762,10 @@ async function handleClaude(message, content) {
           } catch {}
         }
 
-        // 위임 메시지 전송
-        if (pj.message) await sendResponseWithFiles(message, pj.message);
-
-        // 위임 실행 (라우터는 이미 정리됨)
+        // ④ 위임 실행 (백그라운드 — 라우터는 여기서 끝)
         if (targetId && task) {
           const src = getAgentForChannel(channelId);
           delegateToAgent(src?.name || agentLabel, targetId, task, message);
-          // await 안 함 — 라우터는 여기서 끝, 위임은 백그라운드 실행
         }
         return;
       }
