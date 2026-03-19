@@ -11,3 +11,4 @@ config.json
 Claude-Bot-Installer*.pkg
 Claude-Bot-Installer*.zip
 installer-app/
+bot.js
