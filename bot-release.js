@@ -729,15 +729,38 @@ async function handleClaude(message, content) {
     if (result2) {
       const { parsed: pj, before, after } = result2;
 
-      // 위임이 있으면 위임 메시지만 보내고 끝
+      // 위임이 있으면 라우터 즉시 정리 → 위임 메시지 → 위임 실행
       if (pj.delegate) {
         const { agent: targetId, task } = pj.delegate;
+
+        // 라우터 즉시 정리 (타이핑, 진행 임베드 중지)
+        clearInterval(typingInterval);
+        clearInterval(progressInterval);
+        activeRequests.delete(channelId);
+        activeProcesses.delete(channelId);
+
+        // 라우터 진행 임베드 → 완료로 업데이트
+        if (progressMsg) {
+          try {
+            await progressMsg.edit({ embeds: [{
+              color: 0x22C55E,
+              author: { name: `${agentLabel} 위임 완료` },
+              description: `🤝 → ${targetId} 에이전트에게 위임`,
+              footer: { text: `⏱️ ${timeStr} 소요` },
+            }] });
+          } catch {}
+        }
+
+        // 위임 메시지 전송
         if (pj.message) await sendResponseWithFiles(message, pj.message);
+
+        // 위임 실행 (라우터는 이미 정리됨)
         if (targetId && task) {
           const src = getAgentForChannel(channelId);
-          await delegateToAgent(src?.name || agentLabel, targetId, task, message);
+          delegateToAgent(src?.name || agentLabel, targetId, task, message);
+          // await 안 함 — 라우터는 여기서 끝, 위임은 백그라운드 실행
         }
-        return;  // 위임 후 즉시 종료 — 추가 응답 없음
+        return;
       }
 
       // 일반 JSON 처리 (위임 없는 경우)
