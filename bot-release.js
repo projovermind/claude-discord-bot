@@ -605,6 +605,14 @@ async function handleClaude(message, content) {
   try {
     let systemPrompt = agent.systemPrompt + '\n\n' + DISCORD_ACTIONS_PROMPT;
 
+    // 에이전트 위임 ID 목록 자동 주입 (config에서 동적 생성)
+    const agentConfig = loadConfig();
+    const agentList = Object.entries(agentConfig.agents || {})
+      .filter(([id]) => id !== 'default')
+      .map(([id, a]) => `${a.avatar || '🤖'} ${a.name} → \`${id}\``)
+      .join('\n');
+    systemPrompt += `\n\n## 위임 가능한 에이전트 (delegate 시 정확한 ID 사용)\n${agentList}`;
+
     // 세션 턴 수 초과 시 자동 요약 + 리셋
     await maybeRotateSession(channelId, agent);
 
