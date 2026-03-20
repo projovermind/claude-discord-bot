@@ -2212,7 +2212,7 @@ async function updateDashboard() {
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.8';
+const BOT_VERSION = '2.9.12';
 
 async function checkForUpdates() {
   const config = loadConfig();
