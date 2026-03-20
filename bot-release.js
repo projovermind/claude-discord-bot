@@ -267,6 +267,10 @@ async function maybeRotateSession(channelId, agent) {
 
   console.log(`🔄 세션 로테이션: ch=${channelId} turns=${session.turnCount}`);
 
+  // 채널에 바인딩된 에이전트 ID 찾기
+  const config = loadConfig();
+  const agentId = config.channelBindings?.[channelId] || 'default';
+
   // 현재 세션에서 요약 추출
   try {
     const summaryResult = await _runClaudeOnce(
@@ -275,6 +279,9 @@ async function maybeRotateSession(channelId, agent) {
     );
     const summary = summaryResult.text || '';
     console.log(`📝 세션 요약 완료 (${summary.length}자)`);
+
+    // 공유 노트에도 세션 요약 저장
+    saveSessionSummaryToNotes(agentId, summary);
 
     // 세션 초기화 + 요약 저장
     channelSessions.set(channelId, {
@@ -331,6 +338,10 @@ const DISCORD_ACTIONS_PROMPT = `
 단일 위임: {"message": "사용자 응답", "delegate": {"agent": "에이전트ID", "task": "위임할 작업 설명"}}
 복수 동시 위임: {"message": "사용자 응답", "delegates": [{"agent": "에이전트ID1", "task": "작업1"}, {"agent": "에이전트ID2", "task": "작업2"}]}
 여러 에이전트에게 동시에 작업을 맡길 때는 delegates 배열을 사용하세요. 모든 위임은 병렬로 실행됩니다.
+
+위임 결과를 돌려받아야 할 때는 "returnResult": true를 추가하세요:
+{"message": "분석 결과를 기다립니다.", "delegate": {"agent": "data", "task": "AAPL 분석해줘", "returnResult": true}}
+→ 위임받은 에이전트의 결과가 이 채널에 자동으로 보고됩니다.
 
 파일을 전송해야 할 경우, 응답 텍스트 안에 [[FILE:/절대/경로/파일명]] 패턴을 포함하세요.
 예: 리포트를 작성했습니다. [[FILE:/tmp/report.txt]]
@@ -473,6 +484,70 @@ client.on('messageCreate', async (message) => {
     } else {
       await message.reply('현재 진행 중인 작업이 없습니다.');
     }
+    return;
+  }
+
+  // ── !status — 에이전트 상태 확인 ────
+  if (content === '!status' || content.startsWith('!status ')) {
+    const targetName = content.replace('!status', '').trim();
+    const config = loadConfig();
+    const chId = message.channelId;
+
+    // 특정 에이전트 지정 또는 현재 채널의 에이전트
+    let statusAgentId = config.channelBindings?.[chId] || 'default';
+    if (targetName) {
+      // 이름이나 ID로 에이전트 찾기
+      const found = Object.entries(config.agents || {}).find(([id, a]) =>
+        id === targetName || a.name === targetName || a.name?.includes(targetName)
+      );
+      if (found) statusAgentId = found[0];
+      else { await message.reply(`⚠️ 에이전트 '${targetName}'을(를) 찾을 수 없습니다.`); return; }
+    }
+
+    const statusAgent = config.agents?.[statusAgentId];
+    if (!statusAgent) { await message.reply('⚠️ 에이전트를 찾을 수 없습니다.'); return; }
+
+    // 바인딩 채널 찾기
+    const boundChId = Object.entries(config.channelBindings || {}).find(([, id]) => id === statusAgentId)?.[0];
+
+    // 현재 작업 상태
+    const taskCount = boundChId ? getTaskCount(boundChId) : 0;
+    const queueLen = boundChId ? getQueue(boundChId).length : 0;
+
+    // 현재 도구 정보
+    let currentTools = [];
+    for (const [, proc] of activeProcesses) {
+      if (proc.channelId === boundChId && proc.currentTool) currentTools.push(proc.currentTool);
+      if (proc.agentId === statusAgentId && proc.currentTool) currentTools.push(proc.currentTool);
+    }
+
+    // 세션 정보
+    const session = boundChId ? channelSessions.get(boundChId) : null;
+    const turnCount = session?.turnCount || 0;
+
+    // 최근 작업 통계 (24시간)
+    const now = Date.now();
+    const recentTasks = taskHistory.filter(t => now - t.timestamp < 24 * 60 * 60 * 1000);
+    const avgDuration = recentTasks.length > 0
+      ? Math.round(recentTasks.reduce((s, t) => s + t.durationMs, 0) / recentTasks.length / 1000)
+      : 0;
+
+    // 프로젝트 소속
+    const proj = getProjectForAgent(statusAgentId);
+
+    const statusLines = [
+      `${statusAgent.avatar || '🤖'} **${statusAgent.name}** (\`${statusAgentId}\`)`,
+      '',
+      `📊 **상태**: ${taskCount > 0 ? `🟢 작업 중 (${taskCount}개)` : '⚪ 대기 중'}`,
+      taskCount > 0 && currentTools.length > 0 ? `🔧 **현재**: ${currentTools.join(', ')}` : null,
+      queueLen > 0 ? `📥 **대기열**: ${queueLen}개` : null,
+      `💬 **세션**: ${turnCount}턴 ${session?.sessionId ? '(활성)' : '(없음)'}`,
+      proj ? `📁 **프로젝트**: ${proj.name}` : null,
+      `📈 **오늘 처리**: ${recentTasks.length}건${avgDuration > 0 ? ` (평균 ${avgDuration}초)` : ''}`,
+      statusAgent.model ? `🧠 **모델**: ${statusAgent.model}` : null,
+    ].filter(Boolean);
+
+    await message.reply(statusLines.join('\n'));
     return;
   }
 
@@ -826,9 +901,21 @@ async function handleClaude(message, content) {
 
         // ④ 모든 위임 동시 실행 (병렬 — 라우터는 여기서 끝)
         const src = getAgentForChannel(channelId);
+        const sourceChannel = message.channel;
         for (const d of delegations) {
           if (d.agent && d.task) {
-            delegateToAgent(src?.name || agentLabel, d.agent, d.task, message);
+            // returnResult: true면 위임 결과를 원래 채널에 보고
+            delegateToAgent(src?.name || agentLabel, d.agent, d.task, message)
+              .then(result => {
+                if (d.returnResult && result?.text) {
+                  const agentName = config.agents?.[d.agent]?.name || d.agent;
+                  const summary = result.text.length > 1500
+                    ? result.text.slice(0, 1500) + '...(생략)'
+                    : result.text;
+                  sourceChannel.send(`📋 **${agentName}** 작업 결과:\n${summary}`).catch(() => {});
+                }
+              })
+              .catch(() => {});
           }
         }
         return;
@@ -1898,29 +1985,111 @@ async function sendResponseWithFiles(message, response) {
 
   // 파일 전송
   if (filePaths.length > 0) {
-    const files = filePaths
-      .filter(p => {
-        if (!fs.existsSync(p)) {
-          console.warn(`파일 없음: ${p}`);
-          return false;
-        }
-        return true;
-      })
-      .map(p => ({
-        attachment: p,
-        name: path.basename(p),
-      }));
+    const DISCORD_FILE_LIMIT = 10 * 1024 * 1024; // 10MB
+    const validFiles = filePaths.filter(p => {
+      if (!fs.existsSync(p)) { console.warn(`파일 없음: ${p}`); return false; }
+      return true;
+    });
 
-    if (files.length > 0) {
+    const discordFiles = [];  // Discord로 보낼 파일 (10MB 이하)
+    const telegramFiles = []; // Telegram으로 보낼 파일 (10MB 초과)
+
+    for (const p of validFiles) {
+      const size = fs.statSync(p).size;
+      if (size > DISCORD_FILE_LIMIT) {
+        telegramFiles.push(p);
+      } else {
+        discordFiles.push({ attachment: p, name: path.basename(p) });
+      }
+    }
+
+    // Discord 파일 전송
+    if (discordFiles.length > 0) {
       try {
-        await message.channel.send({ files });
-        console.log(`📤 파일 전송: ${files.map(f => f.name).join(', ')}`);
+        await message.channel.send({ files: discordFiles });
+        console.log(`📤 Discord 파일 전송: ${discordFiles.map(f => f.name).join(', ')}`);
       } catch (err) {
-        console.error('파일 전송 실패:', err.message);
-        await message.channel.send(`❌ 파일 전송 실패: ${err.message}`);
+        console.error('Discord 파일 전송 실패:', err.message);
+        // Discord 실패 시 텔레그램으로 대체
+        telegramFiles.push(...discordFiles.map(f => f.attachment));
+      }
+    }
+
+    // 대용량 파일 → Telegram 전송
+    if (telegramFiles.length > 0) {
+      const telegramResults = await sendFilesViaTelegram(telegramFiles);
+      if (telegramResults.success > 0) {
+        await message.channel.send(`📨 대용량 파일 ${telegramResults.success}개를 Telegram으로 전송했습니다. 파일 수신 채널을 확인하세요.`);
+      }
+      if (telegramResults.failed > 0) {
+        await message.channel.send(`❌ ${telegramResults.failed}개 파일 전송 실패`);
       }
     }
   }
+}
+
+// Telegram API로 대용량 파일 전송 (Discord 10MB 제한 우회)
+async function sendFilesViaTelegram(filePaths) {
+  const config = loadConfig();
+  const telegramToken = process.env.TELEGRAM_TOKEN;
+  const telegramChatId = config.telegramFileChatId; // config에 설정 필요
+
+  if (!telegramToken || !telegramChatId) {
+    console.warn('⚠️ Telegram 파일 전송 미설정: TELEGRAM_TOKEN 또는 telegramFileChatId 없음');
+    return { success: 0, failed: filePaths.length };
+  }
+
+  let success = 0, failed = 0;
+
+  for (const filePath of filePaths) {
+    try {
+      const FormData = require('form-data') || null;
+      // node 내장 모듈로 multipart 전송
+      const fileName = path.basename(filePath);
+      const fileSize = fs.statSync(filePath).size;
+      const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
+
+      // Telegram sendDocument API (50MB까지 지원)
+      const boundary = '----FormBoundary' + Math.random().toString(36).slice(2);
+      const fileData = fs.readFileSync(filePath);
+
+      const header = `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${telegramChatId}\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n📤 ${fileName} (${sizeMB}MB) — Discord에서 전송됨\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`;
+      const footer = `\r\n--${boundary}--\r\n`;
+
+      const body = Buffer.concat([Buffer.from(header), fileData, Buffer.from(footer)]);
+
+      await new Promise((resolve, reject) => {
+        const req = https.request({
+          hostname: 'api.telegram.org',
+          path: `/bot${telegramToken}/sendDocument`,
+          method: 'POST',
+          headers: {
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': body.length,
+          },
+        }, (res) => {
+          let data = '';
+          res.on('data', c => data += c);
+          res.on('end', () => {
+            const result = JSON.parse(data);
+            if (result.ok) { success++; resolve(); }
+            else { failed++; console.error(`Telegram 전송 실패: ${result.description}`); reject(new Error(result.description)); }
+          });
+        });
+        req.on('error', (e) => { failed++; reject(e); });
+        req.write(body);
+        req.end();
+      });
+      console.log(`📨 Telegram 파일 전송: ${fileName} (${sizeMB}MB)`);
+    } catch (err) {
+      console.error(`❌ Telegram 파일 전송 실패 [${path.basename(filePath)}]:`, err.message);
+      failed++;
+    }
+  }
+
+  return { success, failed };
 }
 
 async function sendResponse(message, response) {
@@ -2276,6 +2445,12 @@ async function updateDashboard() {
 //  📋 CHANGELOG (자동 업데이트 시 표시)
 // ─────────────────────────────────────────
 /*CHANGELOG_START
+## v2.9.17
+- 📊 !status 명령어: 에이전트 상태/세션/통계 빠른 확인
+- 📨 대용량 파일 Telegram 전송: Discord 10MB 초과 시 자동 우회
+- 🔄 위임 결과 반환: returnResult로 위임 결과를 원래 채널에 보고
+- 📝 세션 로테이션 시 공유 노트에 요약 자동 저장
+
 ## v2.9.16
 - 📝 프로젝트별 공유 노트 시스템 (shared_notes.json)
 - 에이전트 간 핵심 정보 공유 (분석 결과, 파일 경로, 설정 변경 등)
@@ -2307,7 +2482,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.9.16';
+const BOT_VERSION = '2.9.17';
 
 async function checkForUpdates() {
   const config = loadConfig();
@@ -2727,6 +2902,28 @@ function getSharedNotesPath(agentId) {
   const srcIdx = firstAgent.workingDir.indexOf('/src');
   const projectRoot = srcIdx > 0 ? firstAgent.workingDir.slice(0, srcIdx) : firstAgent.workingDir;
   return path.join(projectRoot, 'shared_notes.json');
+}
+
+// 세션 요약을 공유 노트에 저장
+function saveSessionSummaryToNotes(agentId, summary) {
+  try {
+    const notesPath = getSharedNotesPath(agentId);
+    if (!notesPath || !summary) return;
+
+    let notes = {};
+    if (fs.existsSync(notesPath)) {
+      notes = JSON.parse(fs.readFileSync(notesPath, 'utf-8'));
+    }
+
+    if (!notes[agentId]) notes[agentId] = {};
+    notes[agentId]._sessionSummary = summary;
+    notes[agentId]._sessionRotatedAt = new Date().toISOString();
+
+    fs.writeFileSync(notesPath, JSON.stringify(notes, null, 2));
+    console.log(`📝 공유 노트에 세션 요약 저장: ${agentId}`);
+  } catch (err) {
+    console.warn(`⚠️ 공유 노트 저장 실패: ${err.message}`);
+  }
 }
 
 // 업데이트 체크 — 매일 오전 9시
