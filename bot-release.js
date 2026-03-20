@@ -129,14 +129,33 @@ const client = new Client({
 });
 
 const MAX_RESPONSE_LENGTH = 1900;
-const activeRequests = new Set();
+const MAX_CONCURRENT_PER_CHANNEL = 3;  // 채널당 최대 동시 작업 수
+const activeRequests = new Set();      // 하위 호환용 (대시보드 등)
+const activeTaskCount = new Map();     // channelId → 현재 실행 중인 작업 수
 const botStartTime = Date.now();
 let totalProcessed = 0;   // 봇 시작 이후 처리 완료 건수
 const taskHistory = [];   // { timestamp, durationMs } — 최근 24시간 작업 기록
 
 // ── 메시지 큐 시스템 ──
 const messageQueues = new Map();    // channelId → [{ message, prompt }]
-const activeProcesses = new Map();  // channelId → { proc, abortController, agentLabel }
+const activeProcesses = new Map();  // taskId → { proc, abortController, agentLabel, channelId }
+
+function getTaskCount(channelId) {
+  return activeTaskCount.get(channelId) || 0;
+}
+function incrementTaskCount(channelId) {
+  activeTaskCount.set(channelId, getTaskCount(channelId) + 1);
+  activeRequests.add(channelId);  // 하위 호환
+}
+function decrementTaskCount(channelId) {
+  const count = getTaskCount(channelId) - 1;
+  if (count <= 0) {
+    activeTaskCount.delete(channelId);
+    activeRequests.delete(channelId);  // 하위 호환
+  } else {
+    activeTaskCount.set(channelId, count);
+  }
+}
 
 function getQueue(channelId) {
   if (!messageQueues.has(channelId)) messageQueues.set(channelId, []);
@@ -428,12 +447,18 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // ── !stop / !중지 — 현재 작업 중단 ────
+  // ── !stop / !중지 — 현재 작업 중단 (채널의 모든 활성 작업) ────
   if (content === '!stop' || content === '!중지') {
-    const active = activeProcesses.get(message.channelId);
-    if (active && active.proc) {
-      try { active.proc.kill('SIGTERM'); } catch {}
-      await message.reply(`⏹️ ${active.agentLabel || '봇'} 작업을 중단합니다.`);
+    const chId = message.channelId;
+    let stopped = 0;
+    for (const [tId, entry] of activeProcesses.entries()) {
+      if (entry.channelId === chId && entry.proc) {
+        try { entry.proc.kill('SIGTERM'); } catch {}
+        stopped++;
+      }
+    }
+    if (stopped > 0) {
+      await message.reply(`⏹️ ${stopped}개 작업을 중단합니다.`);
     } else {
       await message.reply('현재 진행 중인 작업이 없습니다.');
     }
@@ -498,8 +523,9 @@ async function handleClaude(message, content) {
   const agentId = config.channelBindings[channelId] || 'default';
   const agent = config.agents[agentId] || config.agents['default'];
 
-  // 채널 단위 동시 실행 제어 — 작업 중이면 큐에 추가
-  if (activeRequests.has(channelId)) {
+  // 채널 단위 동시 실행 제어 — 최대 동시 작업 수 초과 시 큐에 추가
+  const currentTasks = getTaskCount(channelId);
+  if (currentTasks >= MAX_CONCURRENT_PER_CHANNEL) {
     const queue = getQueue(channelId);
     if (queue.length >= 5) {
       await message.reply('⚠️ 대기열이 가득 찼습니다 (최대 5개). 현재 작업 완료 후 다시 시도해주세요.');
@@ -507,17 +533,19 @@ async function handleClaude(message, content) {
     }
     queue.push({ message, prompt });
     const pos = queue.length;
-    await message.reply(`📥 대기열에 추가됨 (${pos}번째) — 현재 작업 완료 후 순서대로 처리합니다.\n💡 \`!stop\`으로 현재 작업 중단, \`!queue\`로 대기열 확인`);
+    await message.reply(`📥 대기열에 추가됨 (${pos}번째) — 현재 ${currentTasks}개 작업 병렬 실행 중, 슬롯 확보 후 처리합니다.\n💡 \`!stop\`으로 작업 중단, \`!queue\`로 대기열 확인`);
     return;
   }
 
-  activeRequests.add(channelId);
+  const taskId = `${channelId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  incrementTaskCount(channelId);
 
   // ── 실시간 진행 현황 시스템 ──
   const agentLabel = agentId !== 'default' ? `${agent.avatar} ${agent.name}` : '🤖 Claude';
+  let alreadyCleaned = false;  // 위임 시 조기 정리 플래그
 
   // 프로세스 추적 (외부에서 !stop으로 중단 가능)
-  activeProcesses.set(channelId, { proc: null, agentLabel });
+  activeProcesses.set(taskId, { proc: null, agentLabel, channelId });
   updateDashboard();   // 대시보드 갱신
   const startTime = Date.now();
   const toolSteps = [];    // 도구 사용 로그
@@ -601,7 +629,7 @@ async function handleClaude(message, content) {
 
     toolSteps.push({ icon, tool: toolName, detail });
     // 대시보드용 현재 작업 업데이트
-    const proc = activeProcesses.get(channelId);
+    const proc = activeProcesses.get(taskId);
     if (proc) proc.currentTool = `${icon} ${toolName}${detail ? ': ' + detail.slice(0, 30) : ''}`;
     console.log(`  📊 [${agentLabel}] ${icon} ${toolName}${detail ? ': ' + detail : ''}`);
   };
@@ -632,7 +660,7 @@ async function handleClaude(message, content) {
 
     // 프로세스 참조 추적 (외부 중단용)
     const onProcSpawn = (proc) => {
-      const entry = activeProcesses.get(channelId);
+      const entry = activeProcesses.get(taskId);
       if (entry) entry.proc = proc;
     };
 
@@ -751,11 +779,12 @@ async function handleClaude(message, content) {
           console.log(`⚠️ 위임 답변 전송 실패: ${e.message}`);
         }
 
-        // ② 라우터 즉시 정리
+        // ② 라우터 즉시 정리 (finally에서 이중 정리 방지)
+        alreadyCleaned = true;
         clearInterval(typingInterval);
         clearInterval(progressInterval);
-        activeRequests.delete(channelId);
-        activeProcesses.delete(channelId);
+        decrementTaskCount(channelId);
+        activeProcesses.delete(taskId);
 
         // ③ 라우터 진행 임베드 → 완료
         if (progressMsg) {
@@ -808,8 +837,10 @@ async function handleClaude(message, content) {
   } finally {
     clearInterval(typingInterval);
     clearInterval(progressInterval);
-    activeRequests.delete(channelId);
-    activeProcesses.delete(channelId);
+    if (!alreadyCleaned) {
+      decrementTaskCount(channelId);
+      activeProcesses.delete(taskId);
+    }
     totalProcessed++;
     const durationMs = Date.now() - startTime;
     taskHistory.push({ timestamp: Date.now(), durationMs });
@@ -2066,17 +2097,22 @@ function buildProjectEmbed(projId, proj, config) {
     for (const chId of boundChannels) {
       if (activeRequests.has(chId)) {
         isWorking = true;
-        const proc = activeProcesses.get(chId);
-        if (proc && proc.currentTool) toolInfo = proc.currentTool;
+        // taskId 기반 activeProcesses에서 이 채널의 작업 찾기
+        for (const [tId, proc] of activeProcesses) {
+          if (proc.channelId === chId && proc.currentTool) {
+            toolInfo = proc.currentTool;
+            break;
+          }
+        }
       }
       const q = messageQueues.get(chId);
       if (q) queueCount += q.length;
     }
 
-    // 위임 작업 감지 (delegate_에이전트ID_timestamp 형태)
+    // 위임 작업 감지 (delegateKey 또는 agentId 필드로 감지)
     if (!isWorking) {
       for (const [key, proc] of activeProcesses) {
-        if (key.startsWith(`delegate_${agentId}_`)) {
+        if (key.startsWith(`delegate_${agentId}_`) || proc.agentId === agentId) {
           isWorking = true;
           if (proc.currentTool) toolInfo = proc.currentTool;
           break;
@@ -2084,10 +2120,16 @@ function buildProjectEmbed(projId, proj, config) {
       }
     }
 
+    // 이 에이전트의 동시 작업 수 계산
+    let concurrentCount = 0;
+    for (const chId of boundChannels) {
+      concurrentCount += getTaskCount(chId);
+    }
+
     if (isWorking) activeCount++;
     else idleCount++;
 
-    agentData.push({ name, avatar: agent.avatar || '🤖', isWorking, toolInfo, queueCount });
+    agentData.push({ name, avatar: agent.avatar || '🤖', isWorking, toolInfo, queueCount, concurrentCount });
   }
 
   // 2단계: 유니코드 공백으로 열 정렬 (코드블록 없이)
@@ -2115,6 +2157,7 @@ function buildProjectEmbed(projId, proj, config) {
     } else {
       status = '대기중';
     }
+    if (a.concurrentCount > 1) status += ` ⚡×${a.concurrentCount}`;
     if (a.queueCount > 0) status += ` 📥+${a.queueCount}`;
     return `${dot} ${a.avatar} **${a.name}**${padding}${status}`;
   });
@@ -2212,7 +2255,7 @@ async function updateDashboard() {
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.9.12';
+const BOT_VERSION = '2.9.14';
 
 async function checkForUpdates() {
   const config = loadConfig();
@@ -2379,14 +2422,17 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
   const targetChannel = targetChannelId ? guild.channels.cache.get(targetChannelId) : null;
   const workChannel = targetChannel || originalMessage.channel;
 
-  // 대시보드에 위임 에이전트 표시 (채널ID 기반으로 등록해야 대시보드에서 감지)
-  const delegateKey = targetChannelId || `delegate_${targetAgentId}_${Date.now()}`;
-  activeRequests.add(delegateKey);
+  // 대시보드에 위임 에이전트 표시
+  const delegateKey = `delegate_${targetAgentId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const delegateChannelId = targetChannelId || delegateKey;
+  if (targetChannelId) incrementTaskCount(targetChannelId);
+  else activeRequests.add(delegateKey);  // 채널 없는 위임은 기존 방식
   activeProcesses.set(delegateKey, {
     proc: null,
     agentLabel,
     currentTool: '🤝 요청 분석 중...',
     agentId: targetAgentId,
+    channelId: targetChannelId || delegateKey,
   });
   updateDashboard();
 
@@ -2521,7 +2567,11 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     return null;
   } finally {
     clearInterval(progressInterval);
-    activeRequests.delete(delegateKey);
+    if (targetChannelId) {
+      decrementTaskCount(targetChannelId);
+    } else {
+      activeRequests.delete(delegateKey);
+    }
     activeProcesses.delete(delegateKey);
     totalProcessed++;
     const durationMs = Date.now() - startTime;
