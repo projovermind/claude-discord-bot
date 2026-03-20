@@ -2208,14 +2208,25 @@ async function setupDashboard() {
         console.log(`📊 대시보드 채널 생성: #${channelName}`);
       }
 
-      // 기존 봇 메시지 찾기
-      const messages = await channel.messages.fetch({ limit: 10 });
-      const botMsg = messages.find(m => m.author.id === client.user.id && m.embeds.length > 0);
-      let message;
+      // 기존 봇 대시보드 메시지 찾기 (핀 우선 → 최근 메시지 fallback)
+      let botMsg = null;
 
+      // 1차: 핀된 메시지에서 찾기 (가장 확실)
+      try {
+        const pinned = await channel.messages.fetchPinned();
+        botMsg = pinned.find(m => m.author.id === client.user.id && m.embeds.length > 0);
+      } catch {}
+
+      // 2차: 최근 메시지에서 찾기
+      if (!botMsg) {
+        const messages = await channel.messages.fetch({ limit: 20 });
+        botMsg = messages.find(m => m.author.id === client.user.id && m.embeds.length > 0);
+      }
+
+      let message;
       if (botMsg) {
         message = botMsg;
-        console.log(`📊 [${proj.name}] 기존 대시보드 재사용`);
+        console.log(`📊 [${proj.name}] 기존 대시보드 재사용 (id=${message.id})`);
       } else {
         const embed = buildProjectEmbed(projId, proj, config);
         message = await channel.send({ embeds: [embed] });
