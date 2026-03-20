@@ -656,6 +656,20 @@ async function handleClaude(message, content) {
       .join('\n');
     systemPrompt += `\n\n## 위임 가능한 에이전트 (delegate 시 정확한 ID 사용)\n${agentList}`;
 
+    // 프로젝트 공유 노트 경로 주입
+    const notesPath = getSharedNotesPath(agentId);
+    if (notesPath) {
+      const proj = getProjectForAgent(agentId);
+      systemPrompt += `\n\n## 프로젝트 공유 노트 (${proj?.name || agentId})
+공유 노트 파일: \`${notesPath}\`
+- 다른 에이전트들과 정보를 공유할 때 이 파일을 사용하세요.
+- **읽기**: 작업 시작 시 이 파일을 읽어서 다른 에이전트가 남긴 정보를 참고하세요.
+- **쓰기**: 다른 에이전트에게 알려야 할 중요한 결과(분석 결과, 생성한 파일 경로, 설정 변경 등)를 기록하세요.
+- JSON 형식: {"에이전트ID": {"key": "value", "updated": "타임스탬프"}}
+- 기존 내용을 덮어쓰지 말고, 자신의 에이전트ID 키만 업데이트하세요.
+- 사소한 내용은 기록하지 마세요. 다른 에이전트가 참고해야 할 핵심 정보만 남기세요.`;
+    }
+
     // 세션 턴 수 초과 시 자동 요약 + 리셋
     await maybeRotateSession(channelId, agent);
 
@@ -2262,6 +2276,11 @@ async function updateDashboard() {
 //  📋 CHANGELOG (자동 업데이트 시 표시)
 // ─────────────────────────────────────────
 /*CHANGELOG_START
+## v2.9.16
+- 📝 프로젝트별 공유 노트 시스템 (shared_notes.json)
+- 에이전트 간 핵심 정보 공유 (분석 결과, 파일 경로, 설정 변경 등)
+- 프로젝트 루트 자동 감지, 시스템 프롬프트에 사용법 자동 주입
+
 ## v2.9.15
 - 🔀 컨텍스트 합류 큐: 작업 중 들어온 메시지를 합쳐서 이전 세션에서 이어 처리
 - 🔧 대시보드 위임 상태 미감지 버그 수정
@@ -2288,7 +2307,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.9.15';
+const BOT_VERSION = '2.9.16';
 
 async function checkForUpdates() {
   const config = loadConfig();
@@ -2678,6 +2697,36 @@ function getAgentForChannel(channelId) {
   const config = loadConfig();
   const agentId = config.channelBindings?.[channelId] || 'default';
   return config.agents?.[agentId] || config.agents?.default || null;
+}
+
+// 에이전트가 속한 프로젝트 찾기
+function getProjectForAgent(agentId) {
+  const config = loadConfig();
+  for (const [projId, proj] of Object.entries(config.projects || {})) {
+    if (proj.agents && proj.agents.includes(agentId)) {
+      return { id: projId, ...proj };
+    }
+  }
+  return null;
+}
+
+// 프로젝트별 공유 노트 경로 (프로젝트 내 첫 에이전트의 workingDir 기준 상위)
+function getSharedNotesPath(agentId) {
+  const config = loadConfig();
+  const proj = getProjectForAgent(agentId);
+  if (!proj) return null;
+
+  // 프로젝트에 sharedNotesPath가 명시되어 있으면 사용
+  if (proj.sharedNotesPath) return proj.sharedNotesPath;
+
+  // 없으면 프로젝트 첫 에이전트의 workingDir에서 공통 상위 경로 추정
+  const firstAgent = config.agents?.[proj.agents[0]];
+  if (!firstAgent?.workingDir) return null;
+
+  // workingDir에서 src/ 이전까지를 프로젝트 루트로 사용
+  const srcIdx = firstAgent.workingDir.indexOf('/src');
+  const projectRoot = srcIdx > 0 ? firstAgent.workingDir.slice(0, srcIdx) : firstAgent.workingDir;
+  return path.join(projectRoot, 'shared_notes.json');
 }
 
 // 업데이트 체크 — 매일 오전 9시
