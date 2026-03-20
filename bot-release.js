@@ -129,7 +129,7 @@ const client = new Client({
 });
 
 const MAX_RESPONSE_LENGTH = 1900;
-const MAX_CONCURRENT_PER_CHANNEL = 3;  // 채널당 최대 동시 작업 수
+const MAX_CONCURRENT_PER_CHANNEL = 1;  // 채널당 동시 작업 수 (1 = 순차 + 컨텍스트 합류)
 const activeRequests = new Set();      // 하위 호환용 (대시보드 등)
 const activeTaskCount = new Map();     // channelId → 현재 실행 중인 작업 수
 const botStartTime = Date.now();
@@ -166,10 +166,21 @@ async function processNextInQueue(channelId) {
   const queue = getQueue(channelId);
   if (queue.length === 0) return;
 
-  const next = queue.shift();
-  console.log(`📬 큐에서 다음 메시지 처리: ch=${channelId} 남은큐=${queue.length}`);
-  // handleClaude를 content 형태로 다시 호출
-  await handleClaude(next.message, '!claude ' + next.prompt);
+  // 큐에 쌓인 메시지를 모두 합쳐서 하나의 프롬프트로 전달
+  // → 이전 작업의 세션 컨텍스트를 유지하면서 추가 요청을 참고할 수 있음
+  if (queue.length === 1) {
+    const next = queue.shift();
+    console.log(`📬 큐에서 다음 메시지 처리: ch=${channelId}`);
+    await handleClaude(next.message, '!claude ' + next.prompt);
+  } else {
+    // 여러 메시지가 쌓여 있으면 합쳐서 하나로 전달
+    const items = queue.splice(0, queue.length);
+    const lastMessage = items[items.length - 1].message;  // 마지막 메시지 객체로 응답
+    const mergedPrompt = items.map((q, i) => `[추가 요청 ${i + 1}] ${q.prompt}`).join('\n\n');
+    const contextPrefix = `⚠️ 이전 작업 도중 아래 ${items.length}개의 추가 요청이 들어왔습니다. 이전 작업 결과를 참고하여 순서대로 처리해주세요:\n\n`;
+    console.log(`📬 큐에서 ${items.length}개 메시지 병합 처리: ch=${channelId}`);
+    await handleClaude(lastMessage, '!claude ' + contextPrefix + mergedPrompt);
+  }
 }
 
 // ── 메시지 중복 처리 방지 (게이트웨이 재전달 대응) ──────
@@ -533,7 +544,7 @@ async function handleClaude(message, content) {
     }
     queue.push({ message, prompt });
     const pos = queue.length;
-    await message.reply(`📥 대기열에 추가됨 (${pos}번째) — 현재 ${currentTasks}개 작업 병렬 실행 중, 슬롯 확보 후 처리합니다.\n💡 \`!stop\`으로 작업 중단, \`!queue\`로 대기열 확인`);
+    await message.reply(`📥 메시지 접수 (${pos}번째) — 현재 작업 완료 후 이어서 처리합니다. 이전 작업 컨텍스트를 참고합니다.\n💡 \`!stop\`으로 현재 작업 중단, \`!queue\`로 대기열 확인`);
     return;
   }
 
@@ -2255,7 +2266,7 @@ async function updateDashboard() {
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.9.14';
+const BOT_VERSION = '2.9.15';
 
 async function checkForUpdates() {
   const config = loadConfig();
