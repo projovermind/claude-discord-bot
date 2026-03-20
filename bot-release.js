@@ -2259,6 +2259,28 @@ async function updateDashboard() {
 }
 
 // ─────────────────────────────────────────
+//  📋 CHANGELOG (자동 업데이트 시 표시)
+// ─────────────────────────────────────────
+/*CHANGELOG_START
+## v2.9.15
+- 🔀 컨텍스트 합류 큐: 작업 중 들어온 메시지를 합쳐서 이전 세션에서 이어 처리
+- 🔧 대시보드 위임 상태 미감지 버그 수정
+- ⚡ taskId 기반 프로세스 추적으로 키 충돌 방지
+
+## v2.9.14
+- 🔀 채널별 병렬 작업 지원 (MAX_CONCURRENT_PER_CHANNEL)
+- 🛑 !stop으로 채널 내 모든 활성 작업 중단
+- 📊 대시보드에 동시 작업 수 표시 (⚡×N)
+
+## v2.9.13
+- 🔗 자동 업데이트 URL 하드코드 fallback 추가
+
+## v2.9.12
+- 🔄 자동 업데이트 시스템 수정
+- 🤝 병렬 다중 에이전트 위임 지원
+CHANGELOG_END*/
+
+// ─────────────────────────────────────────
 //  🔄 자동 업데이트 시스템
 // ─────────────────────────────────────────
 // config.json에 updateUrl 설정 시 매일 체크:
@@ -2327,15 +2349,38 @@ async function checkForUpdates() {
           .setStyle(ButtonStyle.Secondary),
       );
 
-      // 변경사항 추출 (## 변경사항 섹션이 있으면)
-      const changelogMatch = remoteCode.match(/\/\/ CHANGELOG: (.+)/);
-      const changelog = changelogMatch ? changelogMatch[1] : '변경 내역 없음';
+      // 변경사항 추출 (CHANGELOG 블록에서 새 버전 내역만)
+      let changelog = '';
+      const clBlock = remoteCode.match(/\/\*CHANGELOG_START\n([\s\S]*?)CHANGELOG_END\*\//);
+      if (clBlock) {
+        // 새 버전의 섹션만 추출 (## vX.X.X ~ 다음 ## 전까지)
+        const sections = clBlock[1].split(/^## /m).filter(s => s.trim());
+        // 현재 버전보다 새로운 섹션들만 모으기
+        const newSections = [];
+        for (const sec of sections) {
+          const verMatch = sec.match(/^v?([\d.]+)/);
+          if (verMatch && verMatch[1] !== BOT_VERSION) {
+            // 버전 비교: 새 버전이면 포함
+            const lines = sec.trim().split('\n');
+            const verTitle = lines[0].trim();
+            const items = lines.slice(1).map(l => l.trim()).filter(l => l.startsWith('-'));
+            if (items.length > 0) {
+              newSections.push(`**v${verTitle}**\n${items.join('\n')}`);
+            }
+          }
+        }
+        changelog = newSections.length > 0 ? newSections.join('\n\n') : '변경 내역 없음';
+      } else {
+        // fallback: 기존 한줄 방식
+        const changelogMatch = remoteCode.match(/\/\/ CHANGELOG: (.+)/);
+        changelog = changelogMatch ? changelogMatch[1] : '변경 내역 없음';
+      }
 
       await notifyChannel.send({
         embeds: [{
           color: 0x3B82F6,
           author: { name: '🔄 새 업데이트 발견' },
-          description: `**v${BOT_VERSION}** → **v${remoteVersion}**\n\n${changelog}\n\n업데이트를 적용하시겠습니까?`,
+          description: `**v${BOT_VERSION}** → **v${remoteVersion}**\n\n${changelog}`,
           footer: { text: '승인 후 자동으로 업데이트 및 재시작됩니다.' },
         }],
         components: [row],
