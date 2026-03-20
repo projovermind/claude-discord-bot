@@ -2216,8 +2216,7 @@ const BOT_VERSION = '2.9.12';
 
 async function checkForUpdates() {
   const config = loadConfig();
-  const updateUrl = config.updateUrl;
-  if (!updateUrl) return;
+  const updateUrl = config.updateUrl || 'https://raw.githubusercontent.com/projovermind/claude-discord-bot/main/bot-release.js';
 
   // 하루에 한번만 체크
   try {
