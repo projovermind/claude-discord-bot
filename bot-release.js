@@ -2218,11 +2218,29 @@ async function setupDashboard() {
         ? '📊-대시보드'
         : `📊-${proj.name.toLowerCase().replace(/\s+/g, '-')}`;
 
-      // 채널 찾기 또는 생성
-      let channel = guild.channels.cache.find(
-        ch => ch.name === channelName && ch.type === ChannelType.GuildText
-      );
+      // 채널 찾기: 1) config의 dashboardChannelId → 2) 이름 매칭 → 3) 새로 생성
+      let channel = null;
 
+      // 1차: dashboardChannelId로 직접 찾기 (가장 확실)
+      if (proj.dashboardChannelId) {
+        channel = guild.channels.cache.get(proj.dashboardChannelId) || null;
+        if (channel) {
+          console.log(`📊 [${proj.name}] dashboardChannelId로 채널 찾음: #${channel.name}`);
+        }
+      }
+
+      // 2차: 이름 매칭 (정확한 이름 + 키워드 포함 매칭)
+      if (!channel) {
+        const projKeyword = proj.name.toLowerCase().replace(/\s+/g, '-');
+        channel = guild.channels.cache.find(
+          ch => ch.type === ChannelType.GuildText && (
+            ch.name === channelName ||
+            (ch.name.includes('대시보드') && ch.name.includes(projKeyword.split('-')[0]))
+          )
+        ) || null;
+      }
+
+      // 3차: 없으면 새로 생성
       if (!channel) {
         channel = await guild.channels.create({
           name: channelName,
@@ -2231,6 +2249,19 @@ async function setupDashboard() {
           reason: 'Claude Bot 대시보드 자동 생성',
         });
         console.log(`📊 대시보드 채널 생성: #${channelName}`);
+
+        // 생성된 채널 ID를 config에 자동 저장 (다음 재시작 시 ID로 찾기)
+        try {
+          const freshConfig = loadConfig();
+          if (freshConfig.projects && freshConfig.projects[projId]) {
+            freshConfig.projects[projId].dashboardChannelId = channel.id;
+            const configPath = require('path').join(__dirname, 'config.json');
+            require('fs').writeFileSync(configPath, JSON.stringify(freshConfig, null, 2), 'utf-8');
+            console.log(`📊 [${proj.name}] dashboardChannelId 자동 저장: ${channel.id}`);
+          }
+        } catch (saveErr) {
+          console.warn(`📊 dashboardChannelId 저장 실패:`, saveErr.message);
+        }
       }
 
       // 기존 봇 대시보드 메시지 찾기 (핀 우선 → 최근 메시지 fallback)
@@ -2262,17 +2293,23 @@ async function setupDashboard() {
       dashboards.set(projId, { channel, message, lastState: '', project: proj });
     }
 
-    // 대시보드 채널에 사용자 메시지 오면 자동 삭제 (동적 체크)
-    client.on('messageCreate', async (msg) => {
-      if (msg.author.bot) return;
-      const isDashChannel = [...dashboards.values()].some(d => d.channel.id === msg.channelId);
-      if (isDashChannel) {
-        try { await msg.delete(); } catch {}
-      }
-    });
+    // 대시보드 채널에 사용자 메시지 오면 자동 삭제 (중복 등록 방지)
+    if (!setupDashboard._listenerRegistered) {
+      setupDashboard._listenerRegistered = true;
+      client.on('messageCreate', async (msg) => {
+        if (msg.author.bot) return;
+        const isDashChannel = [...dashboards.values()].some(d => d.channel.id === msg.channelId);
+        if (isDashChannel) {
+          try { await msg.delete(); } catch {}
+        }
+      });
+    }
 
-    // 5초마다 전체 업데이트
-    setInterval(() => updateAllDashboards(), 5000);
+    // 5초마다 전체 업데이트 (중복 등록 방지)
+    if (!setupDashboard._intervalRegistered) {
+      setupDashboard._intervalRegistered = true;
+      setInterval(() => updateAllDashboards(), 5000);
+    }
     console.log(`📊 대시보드 ${dashboards.size}개 활성화 (5초 간격)`);
   } catch (err) {
     console.error('❌ 대시보드 설정 실패:', err.message);
