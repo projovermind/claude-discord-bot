@@ -310,6 +310,31 @@ function clearSession(channelId) {
   saveSessions();
 }
 
+// 자기 검증 규칙 (모든 에이전트 공통)
+const SELF_VERIFICATION_PROMPT = `## 자기 검증 규칙 (필수 준수)
+모든 코드 수정/생성 작업 후 반드시 아래 검증 프로세스를 수행하세요. 검증을 통과할 때까지 작업 완료로 보고하지 마세요.
+
+### 검증 프로세스
+1. **구문 검증**: 수정한 파일이 문법 오류 없이 파싱되는지 확인
+   - Python: \`python -c "import ast; ast.parse(open('파일').read())"\` 또는 \`python -m py_compile 파일\`
+   - TypeScript/JavaScript: \`npx tsc --noEmit 파일\` 또는 \`node -c 파일\`
+   - 해당 언어의 린터/컴파일러 사용
+
+2. **테스트 실행**: 프로젝트에 테스트가 존재하면 관련 테스트 실행
+   - 전체 테스트가 너무 오래 걸리면 수정 관련 테스트만 실행
+   - 테스트가 없으면 최소한 import/실행 가능 여부 확인
+
+3. **실패 시 반복**: 검증 실패 → 원인 분석 → 수정 → 재검증 (통과할 때까지)
+
+4. **결과 보고**: 작업 완료 시 검증 결과를 반드시 포함
+   - ✅ 통과: "검증 완료 — 구문 OK, 테스트 N개 통과"
+   - ❌ 실패 후 수정: "검증 1차 실패 → [원인] → 수정 → 2차 통과"
+
+### 예외
+- 단순 텍스트/문서/설정(JSON/YAML/MD) 수정은 구문 검증만
+- GDD, 기획 문서 등 비코드 파일은 검증 불필요
+- 대화만 하는 경우(코드 수정 없음)는 검증 불필요`;
+
 // Discord 관리 작업 지시 (Claude에게 전달)
 const DISCORD_ACTIONS_PROMPT = `
 ## Discord 액션 시스템 (내장 기능 — 별도 도구/권한 불필요)
@@ -721,7 +746,7 @@ async function handleClaude(message, content) {
   };
 
   try {
-    let systemPrompt = agent.systemPrompt + '\n\n' + DISCORD_ACTIONS_PROMPT;
+    let systemPrompt = agent.systemPrompt + '\n\n' + SELF_VERIFICATION_PROMPT + '\n\n' + DISCORD_ACTIONS_PROMPT;
 
     // 에이전트 위임 ID 목록 자동 주입 (config에서 동적 생성)
     const agentConfig = loadConfig();
@@ -2747,7 +2772,7 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     } catch {}
   }, 3000);
 
-  const systemPrompt = targetAgent.systemPrompt + '\n\n' + DISCORD_ACTIONS_PROMPT;
+  const systemPrompt = targetAgent.systemPrompt + '\n\n' + SELF_VERIFICATION_PROMPT + '\n\n' + DISCORD_ACTIONS_PROMPT;
 
   try {
     const onToolUse = (toolName, input) => {
