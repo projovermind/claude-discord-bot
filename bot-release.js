@@ -311,94 +311,99 @@ function clearSession(channelId) {
 }
 
 // 자기 검증 규칙 (모든 에이전트 공통)
+// ── 자기 검증 규칙 (쓰기 권한 있는 에이전트만 주입) ──
 const SELF_VERIFICATION_PROMPT = `## 자기 검증 규칙 (필수 준수)
-모든 코드 수정/생성 작업 후 반드시 아래 검증 프로세스를 수행하세요. 검증을 통과할 때까지 작업 완료로 보고하지 마세요.
+코드 수정/생성 후 반드시 검증하세요. 통과할 때까지 완료 보고 금지.
 
-### 검증 프로세스
-1. **구문 검증**: 수정한 파일이 문법 오류 없이 파싱되는지 확인
-   - Python: \`python -c "import ast; ast.parse(open('파일').read())"\` 또는 \`python -m py_compile 파일\`
-   - TypeScript/JavaScript: \`npx tsc --noEmit 파일\` 또는 \`node -c 파일\`
-   - 해당 언어의 린터/컴파일러 사용
+1. **구문 검증**: Python \`py_compile\`, JS/TS \`node -c\` 또는 \`tsc --noEmit\`
+2. **테스트 실행**: 관련 테스트 실행 (없으면 import 가능 여부 확인)
+3. **실패 시 반복**: 실패 → 수정 → 재검증 (통과까지)
+4. **결과 보고**: ✅ "검증 완료 — 구문 OK, 테스트 N개 통과" / ❌ "1차 실패 → [원인] → 수정 → 2차 통과"
 
-2. **테스트 실행**: 프로젝트에 테스트가 존재하면 관련 테스트 실행
-   - 전체 테스트가 너무 오래 걸리면 수정 관련 테스트만 실행
-   - 테스트가 없으면 최소한 import/실행 가능 여부 확인
+예외: 문서/설정(MD/YAML/JSON) 수정은 구문만, 대화만 하면 검증 불필요.`;
 
-3. **실패 시 반복**: 검증 실패 → 원인 분석 → 수정 → 재검증 (통과할 때까지)
+const WRITE_TOOLS = new Set(['Write', 'Edit', 'Bash']);
 
-4. **결과 보고**: 작업 완료 시 검증 결과를 반드시 포함
-   - ✅ 통과: "검증 완료 — 구문 OK, 테스트 N개 통과"
-   - ❌ 실패 후 수정: "검증 1차 실패 → [원인] → 수정 → 2차 통과"
+function agentHasWriteTools(agent) {
+  return (agent.allowedTools || []).some(t => WRITE_TOOLS.has(t));
+}
 
-### 예외
-- 단순 텍스트/문서/설정(JSON/YAML/MD) 수정은 구문 검증만
-- GDD, 기획 문서 등 비코드 파일은 검증 불필요
-- 대화만 하는 경우(코드 수정 없음)는 검증 불필요`;
+// ── Discord 액션 (코어 — 모든 에이전트) ──
+const DISCORD_CORE_PROMPT = `## Discord 액션 시스템 (내장 — 별도 도구 불필요)
+다른 채널에 메시지 전송, 서버 관리 시 아래 JSON으로 응답 (코드블록 금지):
+{"message": "사용자 메시지", "actions": [...]}
 
-// Discord 관리 작업 지시 (Claude에게 전달)
-const DISCORD_ACTIONS_PROMPT = `
-## Discord 액션 시스템 (내장 기능 — 별도 도구/권한 불필요)
-당신은 Discord 봇 내부에서 실행됩니다. 다른 채널에 메시지 전송, 채널/역할 관리 등은
-외부 도구(MCP 등)가 아닌 아래 JSON 형식으로 응답하면 봇이 자동 실행합니다.
-절대 "권한이 없다", "도구가 필요하다"고 하지 마세요. 이 기능은 항상 사용 가능합니다.
+actions: sendMessage(channel,content), createChannel(name,channelType), deleteChannel(name), renameChannel(name,newName), createRole(name,color), deleteRole(name)
 
-다른 채널에 메시지를 보내거나 서버 관리가 필요할 때, 반드시 아래 JSON만 응답하세요 (마크다운 코드블록 금지):
-{"message": "사용자에게 보여줄 메시지", "actions": [...]}
+파일 전송: 응답에 [[FILE:/경로/파일]] 패턴 포함.
 
-사용 가능한 actions:
-- {"type": "sendMessage", "channel": "채널명", "content": "보낼 내용"}
-- {"type": "createChannel", "name": "채널명", "channelType": "text"|"voice"|"category"}
-- {"type": "deleteChannel", "name": "채널명"}
-- {"type": "renameChannel", "name": "현재채널명", "newName": "새이름"}
-- {"type": "createRole", "name": "역할명", "color": "#FF0000"}
-- {"type": "deleteRole", "name": "역할명"}
+## 행동 규칙
+- 확인 질문 없이 바로 실행. 큰 작업은 계획 보고 후 즉시 실행.
+- Plan 모드 진입 금지. 바로 구현.
+- 자기 채널 요청은 끝까지 책임. 떠넘기기 금지.
+- 완료 시 수정 파일 목록 + 변경 요약 + 테스트 결과 포함.
+- 봇 프로세스 관리 금지 (pgrep/pkill/kill). config.json/.env 삭제 금지. PID 파일 건드리기 금지.
+- 대화/인사/안부는 도구 없이 바로 답변.
+- 세션 연속: !reset까지 대화 이어감. "모르겠습니다" 금지.
+- 한국어 응답. 영어 질문엔 영어. 코드블록에 언어 태그. Discord 마크다운 활용.`;
 
-예시: 사용자가 "알림 채널에 테스트 메시지 보내줘" → 응답:
-{"message": "알림 채널에 메시지를 전송했습니다.", "actions": [{"type": "sendMessage", "channel": "알림", "content": "테스트 메시지입니다."}]}
+// ── 위임 시스템 (위임 가능 에이전트만 주입) ──
+const DISCORD_DELEGATION_PROMPT = `## 에이전트 위임
+작업이 다른 에이전트 전문 영역이면 JSON으로 위임:
+단일: {"message": "응답", "delegate": {"agent": "ID", "task": "설명"}}
+복수: {"message": "응답", "delegates": [{"agent": "ID1", "task": "작업1"}, {"agent": "ID2", "task": "작업2"}]}
+결과 반환: "returnResult": true 추가.`;
 
-일반 대화/코딩 작업은 JSON 없이 그냥 텍스트로 답하세요.
+// ── 시스템 프롬프트 빌더 (토큰 최적화) ──
+function buildSystemPrompt(agent, agentId, agentConfig, sessionData) {
+  let prompt = agent.systemPrompt;
 
-## 에이전트 위임 (다른 에이전트에게 작업 넘기기)
-작업이 다른 에이전트의 전문 영역이면, 아래 JSON으로 위임하세요:
-단일 위임: {"message": "사용자 응답", "delegate": {"agent": "에이전트ID", "task": "위임할 작업 설명"}}
-복수 동시 위임: {"message": "사용자 응답", "delegates": [{"agent": "에이전트ID1", "task": "작업1"}, {"agent": "에이전트ID2", "task": "작업2"}]}
-여러 에이전트에게 동시에 작업을 맡길 때는 delegates 배열을 사용하세요. 모든 위임은 병렬로 실행됩니다.
+  // 최적화 #5: 쓰기 권한 있는 에이전트만 검증 프롬프트 주입
+  if (agentHasWriteTools(agent)) {
+    prompt += '\n\n' + SELF_VERIFICATION_PROMPT;
+  }
 
-위임 결과를 돌려받아야 할 때는 "returnResult": true를 추가하세요:
-{"message": "분석 결과를 기다립니다.", "delegate": {"agent": "data", "task": "AAPL 분석해줘", "returnResult": true}}
-→ 위임받은 에이전트의 결과가 이 채널에 자동으로 보고됩니다.
+  // 최적화 #1: 코어 액션은 항상, 위임은 조건부
+  prompt += '\n\n' + DISCORD_CORE_PROMPT;
 
-파일을 전송해야 할 경우, 응답 텍스트 안에 [[FILE:/절대/경로/파일명]] 패턴을 포함하세요.
-예: 리포트를 작성했습니다. [[FILE:/tmp/report.txt]]
+  // 최적화 #2: 전체 38개 대신 같은 프로젝트 에이전트만 표시
+  const proj = getProjectForAgent(agentId);
+  const projectAgentIds = proj?.agents || [];
+  const allAgents = Object.entries(agentConfig.agents || {}).filter(([id]) => id !== 'default');
 
-## 중요 행동 규칙
-- 사용자가 무언가를 요청하면 **확인 질문 없이 바로 실행**하세요.
-- "확인하고 싶은 부분이 있습니다", "어떤 작업에 대해 물어보시는 건가요?" 같은 **되묻는 질문을 절대 하지 마세요.** 세션 컨텍스트를 확인하고 스스로 판단해서 답하세요.
-- **큰 작업은 계획을 먼저 보고**하세요: "이렇게 진행하겠습니다: 1. ... 2. ... 3. ..." 형식으로 알린 뒤 바로 실행하세요. 승인을 기다리지 마세요.
-- Plan 모드로 진입하지 마세요. 바로 구현하세요.
-- **절대 다른 채널이나 하이브마인드에게 떠넘기지 마세요.** 당신의 채널에서 받은 요청은 당신이 끝까지 책임지세요. 모르는 부분은 파일을 읽고 분석해서 스스로 해결하세요.
-- 작업이 끝나면 반드시 **무엇을 했고, 결과가 무엇인지** 구체적으로 알려주세요.
-- "작업을 완료했습니다"만 말하지 말고, 핵심 내용을 요약해서 보여주세요.
-- 작업 결과에는 반드시: 수정한 파일 목록, 변경 내용 요약, 테스트 결과(있으면)를 포함하세요.
+  // 같은 프로젝트 에이전트 + hivemind/general (항상 포함)
+  const alwaysInclude = new Set(['hivemind', 'general', agentId]);
+  const relevantAgents = allAgents.filter(([id]) =>
+    projectAgentIds.includes(id) || alwaysInclude.has(id)
+  );
 
-## 절대 하지 말아야 할 것
-- **절대로 봇 자체의 프로세스를 관리하지 마세요** (pgrep, pkill, kill, ps 등으로 node/bot.js 프로세스를 조회/종료 금지)
-- 봇의 설정 파일(config.json, .env)을 삭제하거나 초기화하지 마세요
-- /tmp/claude-discord-bot.pid, /tmp/claude-telegram-bot.pid 파일을 건드리지 마세요
-- **도구 사용 전에 반드시 생각하세요**: 이 메시지가 도구 없이 답할 수 있는가? 대화, 인사, 질문, 안부, 의견, 감탄사 등은 **절대 도구를 사용하지 말고 바로 텍스트로 답하세요.**
-- 도구(Bash, Read, Glob, Grep 등)는 **코드 수정, 파일 조회, 데이터 분석 등 실제 작업이 필요할 때만** 사용하세요.
-- "~에게 안부 물어봐줘", "뭐해?", "잘 되고 있어?" 같은 메시지는 도구 호출 없이 바로 답변하거나 위임하세요.
+  if (relevantAgents.length > 0) {
+    prompt += '\n\n' + DISCORD_DELEGATION_PROMPT;
+    const agentList = relevantAgents
+      .filter(([id]) => id !== agentId) // 자기 자신 제외
+      .map(([id, a]) => `${a.avatar || '🤖'} ${a.name} → \`${id}\``)
+      .join('\n');
 
-## 대화 연속성
-- 이 채널의 이전 대화 내용을 기억하고 있습니다. 같은 주제면 이어서 진행하세요.
-- "이전에 말씀하신 내용을 모르겠습니다" 같은 말 대신, 세션 컨텍스트를 활용하세요.
-- !reset 명령이 올 때까지 이 채널의 모든 대화는 연속됩니다.
+    // 다른 프로젝트 에이전트도 있다는 힌트만
+    const otherCount = allAgents.length - relevantAgents.length;
+    const hint = otherCount > 0 ? `\n(다른 프로젝트 에이전트 ${otherCount}개는 hivemind를 통해 위임)` : '';
+    prompt += `\n\n## 위임 가능한 에이전트\n${agentList}${hint}`;
+  }
 
-## 응답 형식
-- 한국어로 답변하세요. 사용자가 영어로 물으면 영어로 답하세요.
-- 코드 블록은 언어 태그를 포함하세요 (\`\`\`python, \`\`\`javascript 등).
-- 긴 응답은 구조화하세요: 제목, 불릿 포인트, 코드 블록 활용.
-- Discord 마크다운을 활용하세요: **굵게**, *기울임*, \`인라인코드\`.`;
+  // 최적화 #3: 공유 노트 — 경로만 알려주기 (장황한 설명 제거)
+  const notesPath = getSharedNotesPath(agentId);
+  if (notesPath) {
+    prompt += `\n\n## 공유 노트: \`${notesPath}\`\n팀 협업 시 읽기/쓰기. JSON 형식, 자기 ID 키만 업데이트.`;
+  }
+
+  // 최적화 #4: 세션 요약 — 한 번만 주입 (summaryConsumed 플래그)
+  if (sessionData?.summary && !sessionData?.sessionId && !sessionData?.summaryConsumed) {
+    prompt += `\n\n## 이전 대화 요약\n${sessionData.summary}`;
+    sessionData.summaryConsumed = true;
+  }
+
+  return prompt;
+}
 
 // ─────────────────────────────────────────
 //  봇 준비
@@ -746,38 +751,13 @@ async function handleClaude(message, content) {
   };
 
   try {
-    let systemPrompt = agent.systemPrompt + '\n\n' + SELF_VERIFICATION_PROMPT + '\n\n' + DISCORD_ACTIONS_PROMPT;
-
-    // 에이전트 위임 ID 목록 자동 주입 (config에서 동적 생성)
-    const agentConfig = loadConfig();
-    const agentList = Object.entries(agentConfig.agents || {})
-      .filter(([id]) => id !== 'default')
-      .map(([id, a]) => `${a.avatar || '🤖'} ${a.name} → \`${id}\``)
-      .join('\n');
-    systemPrompt += `\n\n## 위임 가능한 에이전트 (delegate 시 정확한 ID 사용)\n${agentList}`;
-
-    // 프로젝트 공유 노트 경로 주입
-    const notesPath = getSharedNotesPath(agentId);
-    if (notesPath) {
-      const proj = getProjectForAgent(agentId);
-      systemPrompt += `\n\n## 프로젝트 공유 노트 (${proj?.name || agentId})
-공유 노트 파일: \`${notesPath}\`
-- 다른 에이전트들과 정보를 공유할 때 이 파일을 사용하세요.
-- **읽기**: 작업 시작 시 이 파일을 읽어서 다른 에이전트가 남긴 정보를 참고하세요.
-- **쓰기**: 다른 에이전트에게 알려야 할 중요한 결과(분석 결과, 생성한 파일 경로, 설정 변경 등)를 기록하세요.
-- JSON 형식: {"에이전트ID": {"key": "value", "updated": "타임스탬프"}}
-- 기존 내용을 덮어쓰지 말고, 자신의 에이전트ID 키만 업데이트하세요.
-- 사소한 내용은 기록하지 마세요. 다른 에이전트가 참고해야 할 핵심 정보만 남기세요.`;
-    }
-
     // 세션 턴 수 초과 시 자동 요약 + 리셋
     await maybeRotateSession(channelId, agent);
 
-    // 이전 세션 요약이 있으면 프롬프트에 주입
+    // 토큰 최적화된 시스템 프롬프트 빌드
+    const agentConfig = loadConfig();
     const sessionData = channelSessions.get(channelId);
-    if (sessionData?.summary && !sessionData?.sessionId) {
-      systemPrompt += `\n\n## 이전 대화 요약 (자동 생성)\n${sessionData.summary}`;
-    }
+    let systemPrompt = buildSystemPrompt(agent, agentId, agentConfig, sessionData);
 
     // 대화 세션 연속성 — 이전 세션 이어가기
     let sessionId = getSessionId(channelId);
@@ -858,7 +838,7 @@ async function handleClaude(message, content) {
           try {
             const followUp = await _runClaudeOnce(
               '방금 수행한 작업의 결과를 한국어로 간결하게 요약해서 알려주세요. 반드시 텍스트로 답변하세요.',
-              DISCORD_ACTIONS_PROMPT, agentConfig, result.sessionId
+              DISCORD_CORE_PROMPT, agentConfig, result.sessionId
             );
             if (followUp.text && followUp.text.trim()) {
               await sendResponseWithFiles(message, followUp.text);
@@ -1474,7 +1454,7 @@ async function handleHookCommand(message, content) {
 // ── OAuth 인증 상태 관리 ──
 let _authFailed = false;           // 현재 인증 실패 상태
 let _authFailNotified = false;     // 알림 전송 여부 (중복 알림 방지)
-const AUTH_ALERT_CHANNEL = null; // 인증 알림 채널 (하이브마인드)
+const AUTH_ALERT_CHANNEL = null; // 인증 알림 채널 (릴리즈: 비활성)
 
 function isAuthError(output, stderrOutput) {
   const combined = (output + ' ' + stderrOutput).toLowerCase();
@@ -2833,7 +2813,8 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     } catch {}
   }, 3000);
 
-  const systemPrompt = targetAgent.systemPrompt + '\n\n' + SELF_VERIFICATION_PROMPT + '\n\n' + DISCORD_ACTIONS_PROMPT;
+  const delegateConfig = loadConfig();
+  const systemPrompt = buildSystemPrompt(targetAgent, targetAgentId, delegateConfig, null);
 
   try {
     const onToolUse = (toolName, input) => {
