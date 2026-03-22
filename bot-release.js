@@ -1894,30 +1894,45 @@ function tryParseJSON(raw) {
   } catch {}
 
   // 2차: 텍스트 안에 JSON이 섞여있는 경우 → { 로 시작하는 부분 찾기
-  const jsonStart = raw.indexOf('{"');
-  if (jsonStart === -1) return null;
+  // 문자열 내부의 중괄호를 무시하고 정확한 JSON 경계를 찾음
+  let searchFrom = 0;
+  while (searchFrom < raw.length) {
+    const jsonStart = raw.indexOf('{"', searchFrom);
+    if (jsonStart === -1) break;
 
-  // JSON 끝 찾기: 중괄호 매칭
-  let depth = 0;
-  let jsonEnd = -1;
-  for (let i = jsonStart; i < raw.length; i++) {
-    if (raw[i] === '{') depth++;
-    else if (raw[i] === '}') {
-      depth--;
-      if (depth === 0) { jsonEnd = i + 1; break; }
+    // JSON 끝 찾기: 문자열 내부의 {}를 무시
+    let depth = 0;
+    let jsonEnd = -1;
+    let inString = false;
+    let escape = false;
+
+    for (let i = jsonStart; i < raw.length; i++) {
+      const ch = raw[i];
+      if (escape) { escape = false; continue; }
+      if (ch === '\\' && inString) { escape = true; continue; }
+      if (ch === '"' && !escape) { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) { jsonEnd = i + 1; break; }
+      }
     }
+
+    if (jsonEnd === -1) break;
+
+    try {
+      const jsonStr = raw.slice(jsonStart, jsonEnd);
+      const parsed = JSON.parse(jsonStr);
+      if (parsed.message || parsed.actions || parsed.delegate || parsed.delegates) {
+        const before = raw.slice(0, jsonStart).trim();
+        const after = raw.slice(jsonEnd).trim();
+        return { parsed, before, after };
+      }
+    } catch {}
+
+    searchFrom = jsonStart + 1;  // 이 위치에서 실패하면 다음 { 찾기
   }
-  if (jsonEnd === -1) return null;
-
-  try {
-    const jsonStr = raw.slice(jsonStart, jsonEnd);
-    const parsed = JSON.parse(jsonStr);
-    if (parsed.message || parsed.actions || parsed.delegate) {
-      const before = raw.slice(0, jsonStart).trim();
-      const after = raw.slice(jsonEnd).trim();
-      return { parsed, before, after };
-    }
-  } catch {}
 
   return null;
 }
@@ -2518,6 +2533,11 @@ async function updateDashboard() {
 //  📋 CHANGELOG (자동 업데이트 시 표시)
 // ─────────────────────────────────────────
 /*CHANGELOG_START
+## v2.9.18
+- 🔧 JSON 파싱 버그 수정: 문자열 내부 중괄호로 인한 파싱 실패 해결
+- 🤝 위임 감지 정규식 제거 → tryParseJSON 통합으로 안정성 향상
+- delegate 응답이 텍스트와 섞여 있어도 정확히 감지/처리
+
 ## v2.9.17
 - 📊 !status 명령어: 에이전트 상태/세션/통계 빠른 확인
 - 📨 대용량 파일 Telegram 전송: Discord 10MB 초과 시 자동 우회
@@ -2555,7 +2575,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.9.17';
+const BOT_VERSION = '2.9.18';
 
 async function checkForUpdates() {
   const config = loadConfig();
@@ -2921,21 +2941,31 @@ async function handleDelegation(rawResponse, message) {
       return true;
     }
   } catch {
-    // JSON이 아니면 텍스트에서 delegate 패턴 검색
-    const delegateMatch = rawResponse.match(/\{"delegate":\s*\{[^}]+\}\}/);
-    if (delegateMatch) {
-      try {
-        const delegateJson = JSON.parse(delegateMatch[0]);
-        const { agent: targetId, task } = delegateJson.delegate;
-        if (targetId && task) {
-          const sourceAgent = getAgentForChannel(message.channel.id);
-          await delegateToAgent(sourceAgent?.name || '메인', targetId, task, message);
-          // delegate 부분 제거한 나머지 텍스트 전송
-          const remaining = rawResponse.replace(delegateMatch[0], '').trim();
-          if (remaining) await sendResponseWithFiles(message, remaining);
-          return true;
+    // JSON이 아니면 tryParseJSON으로 텍스트 내 JSON 추출
+    const extracted = tryParseJSON(rawResponse);
+    if (extracted && extracted.parsed.delegate) {
+      const { agent: targetId, task, returnResult } = extracted.parsed.delegate;
+      if (targetId && task) {
+        // message가 있으면 먼저 전송
+        const msg = extracted.parsed.message || extracted.before;
+        if (msg) await sendResponseWithFiles(message, msg);
+
+        const sourceAgent = getAgentForChannel(message.channel.id);
+        const delegatePromise = delegateToAgent(sourceAgent?.name || '메인', targetId, task, message);
+
+        if (returnResult) {
+          delegatePromise.then(result => {
+            if (result?.text) {
+              const agentName = loadConfig().agents?.[targetId]?.name || targetId;
+              const summary = result.text.length > 1500 ? result.text.slice(0, 1500) + '...(생략)' : result.text;
+              message.channel.send(`📋 **${agentName}** 작업 결과:\n${summary}`).catch(() => {});
+            }
+          }).catch(() => {});
         }
-      } catch {}
+
+        if (extracted.after) await sendResponseWithFiles(message, extracted.after);
+        return true;
+      }
     }
   }
   return false;
