@@ -2533,6 +2533,10 @@ async function updateDashboard() {
 //  📋 CHANGELOG (자동 업데이트 시 표시)
 // ─────────────────────────────────────────
 /*CHANGELOG_START
+## v2.9.19
+- 🧠 위임받은 에이전트가 기존 세션을 이어가도록 수정 (컨텍스트 유지)
+- 위임 완료 후 세션ID 저장 → 다음 위임에서도 이전 대화 참조 가능
+
 ## v2.9.18
 - 🔧 JSON 파싱 버그 수정: 문자열 내부 중괄호로 인한 파싱 실패 해결
 - 🤝 위임 감지 정규식 제거 → tryParseJSON 통합으로 안정성 향상
@@ -2575,7 +2579,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.9.18';
+const BOT_VERSION = '2.9.19';
 
 async function checkForUpdates() {
   const config = loadConfig();
@@ -2856,7 +2860,9 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
       workChannel.sendTyping().catch(() => {});
     }, 5000);
 
-    const result = await _runClaudeOnce(task, systemPrompt, targetAgent, null, onToolUse, onProcSpawn);
+    // 위임받은 에이전트의 기존 세션 이어가기 (컨텍스트 유지)
+    const delegateSessionId = targetChannelId ? getSessionId(targetChannelId) : null;
+    const result = await _runClaudeOnce(task, systemPrompt, targetAgent, delegateSessionId, onToolUse, onProcSpawn);
 
     clearInterval(typingInterval);
 
@@ -2886,6 +2892,11 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
           }],
         });
       } catch {}
+    }
+
+    // 위임받은 에이전트 세션 저장 (다음 위임에서 이어가기)
+    if (targetChannelId && result.sessionId) {
+      setSessionId(targetChannelId, result.sessionId);
     }
 
     // 결과 텍스트 전송
