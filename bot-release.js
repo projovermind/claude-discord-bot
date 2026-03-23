@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
+const { runAgent: runZAI, isBackendAvailable } = require('./zai_runner');
 
 // ─────────────────────────────────────────
 //  Claude CLI 경로 탐지 (launchctl PATH 문제 방지)
@@ -196,7 +197,7 @@ function markMessageProcessed(messageId) {
 const SESSION_FILE = path.join(__dirname, '.sessions.json');
 const channelSessions = new Map(); // channelId -> { sessionId, lastUsed, turnCount, summary }
 const SESSION_TTL = 0; // 수동 초기화(!reset) 전까지 세션 영구 유지
-const SESSION_MAX_TURNS = 100; // 100턴 후 자동 요약 + 리셋 (0=비활성화)
+const SESSION_MAX_TURNS = 30; // 30턴 후 자동 요약 + 리셋 (컨텍스트 비대화 방지)
 
 // 시작 시 디스크에서 세션 복원
 function loadSessions() {
@@ -262,14 +263,17 @@ function setSessionId(channelId, sessionId) {
 async function maybeRotateSession(channelId, agent) {
   const session = channelSessions.get(channelId);
   if (!session || !session.sessionId) return null;
-  if (SESSION_MAX_TURNS <= 0) return null;  // 0이면 비활성화
-  if ((session.turnCount || 0) < SESSION_MAX_TURNS) return null;
 
-  console.log(`🔄 세션 로테이션: ch=${channelId} turns=${session.turnCount}`);
-
-  // 채널에 바인딩된 에이전트 ID 찾기
+  // per-agent maxTurns 지원 (config에 maxTurns 있으면 우선, 없으면 글로벌 기본값)
   const config = loadConfig();
   const agentId = config.channelBindings?.[channelId] || 'default';
+  const agentConfig = config.agents?.[agentId] || {};
+  const maxTurns = agentConfig.maxTurns || SESSION_MAX_TURNS;
+
+  if (maxTurns <= 0) return null;  // 0이면 비활성화
+  if ((session.turnCount || 0) < maxTurns) return null;
+
+  console.log(`🔄 세션 로테이션: ch=${channelId} turns=${session.turnCount} maxTurns=${maxTurns}`);
 
   // 현재 세션에서 요약 추출
   try {
@@ -342,7 +346,8 @@ actions: sendMessage(channel,content), createChannel(name,channelType), deleteCh
 - Plan 모드 진입 금지. 바로 구현.
 - 자기 채널 요청은 끝까지 책임. 떠넘기기 금지.
 - 완료 시 수정 파일 목록 + 변경 요약 + 테스트 결과 포함.
-- 봇 프로세스 관리 금지 (pgrep/pkill/kill). config.json/.env 삭제 금지. PID 파일 건드리기 금지.
+- 봇 프로세스 관리 절대 금지: kill, pkill, pgrep, killall, launchctl, nohup node bot.js, pm2, systemctl 등 프로세스 관리 명령어 사용 시 봇이 죽습니다. 절대 실행하지 마세요.
+- config.json, .env, .sessions.json, PID 파일 삭제/초기화 금지.
 - 대화/인사/안부는 도구 없이 바로 답변.
 - 세션 연속: !reset까지 대화 이어감. "모르겠습니다" 금지.
 - 한국어 응답. 영어 질문엔 영어. 코드블록에 언어 태그. Discord 마크다운 활용.`;
@@ -1454,7 +1459,7 @@ async function handleHookCommand(message, content) {
 // ── OAuth 인증 상태 관리 ──
 let _authFailed = false;           // 현재 인증 실패 상태
 let _authFailNotified = false;     // 알림 전송 여부 (중복 알림 방지)
-const AUTH_ALERT_CHANNEL = null; // 인증 알림 채널 (릴리즈: 비활성)
+const AUTH_ALERT_CHANNEL = null; // 인증 알림 채널 (하이브마인드)
 
 function isAuthError(output, stderrOutput) {
   const combined = (output + ' ' + stderrOutput).toLowerCase();
@@ -1789,6 +1794,28 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
 }
 
 async function runClaude(prompt, systemPrompt, agent = {}, sessionId = null, onToolUse = null, onProcSpawn = null) {
+  // ── OpenAI-compatible 백엔드 분기 (zai, deepseek, openai, openrouter) ──
+  if (agent.backend && agent.backend !== 'claude') {
+    if (!isBackendAvailable(agent.backend)) {
+      throw new Error(`Backend "${agent.backend}" not available. Set ${agent.backend.toUpperCase()}_API_KEY in .env`);
+    }
+    console.log(`🌐 ${agent.backend} 백엔드 사용: model=${agent.model || 'default'}`);
+    const result = await runZAI({
+      message: prompt,
+      systemPrompt,
+      agent,
+      backend: agent.backend,
+      workingDir: agent.workingDir,
+      onToolCall: (name, args) => {
+        console.log(`  🔧 [${agent.backend}] ${name}(${JSON.stringify(args).substring(0, 100)})`);
+        if (onToolUse) onToolUse(name);
+      },
+    });
+    console.log(`  📊 [${agent.backend}] tokens: ${result.usage.prompt_tokens}+${result.usage.completion_tokens}, tools: ${result.toolCalls.length}`);
+    return result;
+  }
+
+  // ── Claude CLI 경로 (기본) ──
   // 이미 인증 실패 상태 → 키체인에서 새 토큰 시도
   if (_authFailed) {
     console.log('⚠️ 인증 실패 상태 — 키체인 토큰 재확인 중...');
