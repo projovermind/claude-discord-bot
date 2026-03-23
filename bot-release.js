@@ -117,6 +117,84 @@ function saveConfig(config) {
 fs.mkdirSync(TMP_DIR, { recursive: true });
 
 // ─────────────────────────────────────────
+//  Agent Rules — 채널별 모델 라우팅 (범용)
+// ─────────────────────────────────────────
+const AGENT_RULES_PATH = path.join(__dirname, 'agent-rules.json');
+let _agentRules = null;       // 원본 JSON
+let _agentRulesMtime = 0;
+let _channelModelMap = null;  // channelId → model 캐시
+
+function loadAgentRules() {
+  try {
+    const stat = fs.statSync(AGENT_RULES_PATH);
+    if (stat.mtimeMs !== _agentRulesMtime || !_agentRules) {
+      _agentRules = JSON.parse(fs.readFileSync(AGENT_RULES_PATH, 'utf-8'));
+      _agentRulesMtime = stat.mtimeMs;
+      // agents 객체에서 channel_id → model 매핑 테이블 빌드
+      _channelModelMap = {};
+      for (const [name, def] of Object.entries(_agentRules.agents || {})) {
+        if (def.channel_id && def.model) {
+          _channelModelMap[def.channel_id] = def.model;
+        }
+      }
+      console.log(`📐 Agent rules 로드 (${Object.keys(_channelModelMap).length}개 채널 모델 매핑)`);
+    }
+  } catch (err) {
+    if (!_agentRules) {
+      // 파일 없음 → 빈 규칙 (기존 동작 유지)
+      _agentRules = { model_tiers: {}, agents: {} };
+      _channelModelMap = {};
+    }
+  }
+  return _agentRules;
+}
+
+/**
+ * 채널 ID → 모델 문자열 조회.
+ * agent-rules.json의 agents[*].channel_id로 매핑.
+ * 매핑 없으면 null (기본 모델 유지).
+ */
+function getChannelModel(channelId) {
+  loadAgentRules();
+  return _channelModelMap?.[channelId] || null;
+}
+
+/**
+ * 모델 문자열 → model_tiers에서 티어 정보 해석.
+ * { cliModel, backend?, zaiModel? } 또는 null.
+ */
+function resolveModelTier(modelStr) {
+  if (!modelStr) return null;
+  const rules = loadAgentRules();
+  for (const [, tierDef] of Object.entries(rules.model_tiers || {})) {
+    if (tierDef.id === modelStr) {
+      return {
+        cliModel: tierDef.cli_model || modelStr,
+        backend: tierDef.backend || null,
+        zaiModel: tierDef.zai_model || null,
+      };
+    }
+  }
+  // model_tiers에 정의 안 된 모델 → CLI 모델명으로 직접 사용
+  return { cliModel: modelStr, backend: null, zaiModel: null };
+}
+
+/**
+ * exclusive_files 수정 감지.
+ * model_tiers.opus.exclusive_files에 매칭되면 true.
+ */
+function isExclusiveFile(filePath) {
+  if (!filePath) return false;
+  const rules = loadAgentRules();
+  const excl = rules.model_tiers?.opus?.exclusive_files;
+  if (!excl || !Array.isArray(excl)) return false;
+  return excl.some(pattern => filePath.endsWith(pattern) || filePath.includes(pattern));
+}
+
+// 초기 로드 (파일 없으면 조용히 무시)
+loadAgentRules();
+
+// ─────────────────────────────────────────
 //  Discord 클라이언트
 // ─────────────────────────────────────────
 const client = new Client({
@@ -579,7 +657,11 @@ client.on('messageCreate', async (message) => {
       `💬 **세션**: ${turnCount}턴 ${session?.sessionId ? '(활성)' : '(없음)'}`,
       proj ? `📁 **프로젝트**: ${proj.name}` : null,
       `📈 **오늘 처리**: ${recentTasks.length}건${avgDuration > 0 ? ` (평균 ${avgDuration}초)` : ''}`,
-      statusAgent.model ? `🧠 **모델**: ${statusAgent.model}` : null,
+      (() => {
+        const ruleModel = getChannelModel(boundChId || chId);
+        if (ruleModel) return `🧠 **모델**: ${ruleModel}`;
+        return statusAgent.model ? `🧠 **모델**: ${statusAgent.model}` : null;
+      })(),
     ].filter(Boolean);
 
     await message.reply(statusLines.join('\n'));
@@ -642,7 +724,36 @@ async function handleClaude(message, content) {
   const config = loadConfig();
   const channelId = message.channelId;
   const agentId = config.channelBindings[channelId] || 'default';
-  const agent = config.agents[agentId] || config.agents['default'];
+  const agent = { ...(config.agents[agentId] || config.agents['default']) };
+
+  // ── Agent Rules: 채널별 모델 라우팅 ──
+  const channelModel = getChannelModel(channelId);
+  if (channelModel) {
+    const tier = resolveModelTier(channelModel);
+    if (tier) {
+      agent.model = tier.cliModel;
+      if (tier.backend === 'zai') {
+        agent.backend = 'zai';
+        agent.zaiModel = tier.zaiModel;
+      } else if (agent.backend === 'zai') {
+        delete agent.backend;
+      }
+      console.log(`📐 [모델 라우팅] ch=${channelId} → ${channelModel} (cli: ${tier.cliModel})`);
+    }
+  }
+
+  // ── exclusive_files 에스컬레이션: 이전 요청에서 플래그 설정된 경우 opus 승격 ──
+  const prevSession = channelSessions.get(channelId);
+  if (prevSession?._escalateNext) {
+    const escModel = prevSession._escalateNext;
+    delete prevSession._escalateNext;
+    const escTier = resolveModelTier(escModel);
+    if (escTier) {
+      agent.model = escTier.cliModel;
+      if (agent.backend === 'zai') delete agent.backend;
+      console.log(`⚡ [에스컬레이션] ch=${channelId} → ${escModel} (exclusive_file 수정 후 자동 승격)`);
+    }
+  }
 
   // 채널 단위 동시 실행 제어 — 최대 동시 작업 수 초과 시 큐에 추가
   const currentTasks = getTaskCount(channelId);
@@ -735,6 +846,8 @@ async function handleClaude(message, content) {
     WebFetch: '🌐', TodoWrite: '📋', NotebookEdit: '📓',
   };
 
+  let _escalatedToOpus = false;
+
   const onToolUse = (toolName, input) => {
     const icon = TOOL_ICONS[toolName] || '⚙️';
     let detail = '';
@@ -746,6 +859,19 @@ async function handleClaude(message, content) {
       else if (input.pattern) detail = `"${input.pattern}"`;
       else if (input.query) detail = input.query.length > 40 ? input.query.slice(0, 37) + '...' : input.query;
       else if (input.content && input.file_path) detail = input.file_path.split('/').pop();
+    }
+
+    // ── exclusive_files 수정 감지 → 다음 요청 opus 에스컬레이션 ──
+    if (!_escalatedToOpus && (toolName === 'Edit' || toolName === 'Write') && input?.file_path) {
+      if (isExclusiveFile(input.file_path)) {
+        const opusTier = loadAgentRules().model_tiers?.opus;
+        if (opusTier?.id) {
+          _escalatedToOpus = true;
+          console.log(`⚡ [에스컬레이션] exclusive_file 수정: ${input.file_path} → 다음 요청 ${opusTier.id}`);
+          const session = channelSessions.get(channelId);
+          if (session) session._escalateNext = opusTier.id;
+        }
+      }
     }
 
     toolSteps.push({ icon, tool: toolName, detail });
@@ -1459,7 +1585,7 @@ async function handleHookCommand(message, content) {
 // ── OAuth 인증 상태 관리 ──
 let _authFailed = false;           // 현재 인증 실패 상태
 let _authFailNotified = false;     // 알림 전송 여부 (중복 알림 방지)
-const AUTH_ALERT_CHANNEL = null; // 인증 알림 채널 (하이브마인드)
+const AUTH_ALERT_CHANNEL = null;
 
 function isAuthError(output, stderrOutput) {
   const combined = (output + ' ' + stderrOutput).toLowerCase();
@@ -2603,7 +2729,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.9.19';
+const BOT_VERSION = '2.9.20';
 
 async function checkForUpdates() {
   const config = loadConfig();
