@@ -1705,7 +1705,7 @@ async function handleHookCommand(message, content) {
 // ── OAuth 인증 상태 관리 ──
 let _authFailed = false;           // 현재 인증 실패 상태
 let _authFailNotified = false;     // 알림 전송 여부 (중복 알림 방지)
-const AUTH_ALERT_CHANNEL = null;
+const AUTH_ALERT_CHANNEL = null; // 인증 알림 채널 (하이브마인드)
 
 function isAuthError(output, stderrOutput) {
   const combined = (output + ' ' + stderrOutput).toLowerCase();
@@ -1825,9 +1825,25 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
       cleanEnv.PATH = extraPaths.join(':') + ':' + cleanEnv.PATH;
     }
 
-    // Claude 기본: CLI가 자체적으로 키체인에서 읽고 refresh
-    // (Z.ai 백엔드는 runClaude()에서 runZAI 직접 호출로 분기됨)
-    delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN;
+    // Z.ai Max 구독: Claude CLI를 Z.ai Anthropic 프록시로 우회
+    if (agent.backend === 'zai') {
+      const zaiKey = agent.zaiApiKey || cleanEnv.ZAI_API_KEY;
+      if (zaiKey) {
+        cleanEnv.ANTHROPIC_AUTH_TOKEN = zaiKey;
+        cleanEnv.ANTHROPIC_BASE_URL = 'https://api.z.ai/api/anthropic';
+        cleanEnv.API_TIMEOUT_MS = '300000';
+        // Max 기본: GLM-4.7, Max+GLM-5는 수동 설정 필요
+        const zaiModel = agent.zaiModel || 'glm-4.7';
+        cleanEnv.ANTHROPIC_DEFAULT_OPUS_MODEL = zaiModel;
+        cleanEnv.ANTHROPIC_DEFAULT_SONNET_MODEL = zaiModel;
+        cleanEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'glm-4.5-air';
+        delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN;
+        console.log(`🧿 Z.ai 프록시: model=${zaiModel}`);
+      }
+    } else {
+      // Claude 기본: CLI가 자체적으로 키체인에서 읽고 refresh
+      delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN;
+    }
 
     // stream-json 모드: 실시간 도구 사용 이벤트 수신 가능 (--verbose 필수)
     const useStream = !!onToolUse;
@@ -2040,9 +2056,9 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
 }
 
 async function runClaude(prompt, systemPrompt, agent = {}, sessionId = null, onToolUse = null, onProcSpawn = null) {
-  // ── OpenAI-compatible 백엔드 분기 (zai, deepseek, openai, openrouter) ──
-  // Z.ai도 직접 API 호출 (Claude CLI 프록시 우회 → Claude Max 한도 회피)
-  if (agent.backend && agent.backend !== 'claude') {
+  // ── OpenAI-compatible 백엔드 분기 (deepseek, openai, openrouter) ──
+  // Z.ai Max 구독은 Claude CLI 프록시 방식 사용 → _runClaudeOnce에서 env 주입
+  if (agent.backend && agent.backend !== 'claude' && agent.backend !== 'zai') {
     if (!isBackendAvailable(agent.backend)) {
       throw new Error(`Backend "${agent.backend}" not available. Set ${agent.backend.toUpperCase()}_API_KEY in .env`);
     }
