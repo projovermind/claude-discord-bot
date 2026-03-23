@@ -117,6 +117,45 @@ function saveConfig(config) {
 fs.mkdirSync(TMP_DIR, { recursive: true });
 
 // ─────────────────────────────────────────
+//  Secrets — ZhiPu API 키 로드 + 로테이션
+// ─────────────────────────────────────────
+const SECRETS_PATH = path.join(__dirname, 'config', 'secrets.json');
+let _zhipuKeyIndex = 0;
+
+function loadSecrets() {
+  try { return JSON.parse(fs.readFileSync(SECRETS_PATH, 'utf-8')); } catch { return {}; }
+}
+
+/** ZhiPu API 키 반환 (2키 로테이션). .env 우선, 없으면 secrets.json */
+function getZhipuApiKey() {
+  if (process.env.ZAI_API_KEY) return process.env.ZAI_API_KEY;
+  const secrets = loadSecrets();
+  const keys = [secrets.zhipu_api_key, secrets.zhipu_api_key_2].filter(Boolean);
+  if (keys.length === 0) return null;
+  const key = keys[_zhipuKeyIndex % keys.length];
+  return key;
+}
+
+function rotateZhipuKey() {
+  _zhipuKeyIndex++;
+  console.log(`🔑 ZhiPu API 키 로테이션 → slot ${_zhipuKeyIndex % 2}`);
+}
+
+function getZhipuBaseUrl() {
+  const secrets = loadSecrets();
+  return secrets.zhipu_base_url || 'https://api.z.ai/api/paas/v4/';
+}
+
+// ZAI_API_KEY가 .env에 없으면 secrets.json에서 주입
+if (!process.env.ZAI_API_KEY) {
+  const key = getZhipuApiKey();
+  if (key) {
+    process.env.ZAI_API_KEY = key;
+    console.log('🔑 ZhiPu API 키 로드 (config/secrets.json)');
+  }
+}
+
+// ─────────────────────────────────────────
 //  Agent Rules — 채널별 모델 라우팅 (범용)
 // ─────────────────────────────────────────
 const AGENT_RULES_PATH = path.join(__dirname, 'agent-rules.json');
@@ -1786,25 +1825,9 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
       cleanEnv.PATH = extraPaths.join(':') + ':' + cleanEnv.PATH;
     }
 
-    // Z.ai 백엔드: Claude CLI를 Z.ai 프록시로 우회 (GLM 모델 사용)
-    if (agent.backend === 'zai') {
-      const zaiKey = agent.zaiApiKey || cleanEnv.ZAI_API_KEY;
-      if (zaiKey) {
-        cleanEnv.ANTHROPIC_AUTH_TOKEN = zaiKey;
-        cleanEnv.ANTHROPIC_BASE_URL = 'https://api.z.ai/api/anthropic';
-        cleanEnv.API_TIMEOUT_MS = '300000';
-        // GLM-5 모델 매핑 (Max 구독)
-        cleanEnv.ANTHROPIC_DEFAULT_OPUS_MODEL = agent.zaiModel || 'glm-5';
-        cleanEnv.ANTHROPIC_DEFAULT_SONNET_MODEL = agent.zaiModel || 'glm-5';
-        cleanEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'glm-4.5-air';
-        // Z.ai는 OAuth가 아닌 API 키 인증
-        delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN;
-        console.log(`🧿 Z.ai 프록시 모드: model=${cleanEnv.ANTHROPIC_DEFAULT_OPUS_MODEL}`);
-      }
-    } else {
-      // Claude 기본: CLI가 자체적으로 키체인에서 읽고 refresh
-      delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN;
-    }
+    // Claude 기본: CLI가 자체적으로 키체인에서 읽고 refresh
+    // (Z.ai 백엔드는 runClaude()에서 runZAI 직접 호출로 분기됨)
+    delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN;
 
     // stream-json 모드: 실시간 도구 사용 이벤트 수신 가능 (--verbose 필수)
     const useStream = !!onToolUse;
@@ -2017,14 +2040,14 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
 }
 
 async function runClaude(prompt, systemPrompt, agent = {}, sessionId = null, onToolUse = null, onProcSpawn = null) {
-  // ── OpenAI-compatible 백엔드 분기 (deepseek, openai, openrouter) ──
-  // Z.ai는 Claude CLI 프록시 방식이므로 여기서 제외 → _runClaudeOnce에서 env 주입
-  if (agent.backend && agent.backend !== 'claude' && agent.backend !== 'zai') {
+  // ── OpenAI-compatible 백엔드 분기 (zai, deepseek, openai, openrouter) ──
+  // Z.ai도 직접 API 호출 (Claude CLI 프록시 우회 → Claude Max 한도 회피)
+  if (agent.backend && agent.backend !== 'claude') {
     if (!isBackendAvailable(agent.backend)) {
       throw new Error(`Backend "${agent.backend}" not available. Set ${agent.backend.toUpperCase()}_API_KEY in .env`);
     }
     console.log(`🌐 ${agent.backend} 백엔드 사용: model=${agent.model || 'default'}`);
-    const result = await runZAI({
+    const zaiOpts = {
       message: prompt,
       systemPrompt,
       agent,
@@ -2032,9 +2055,24 @@ async function runClaude(prompt, systemPrompt, agent = {}, sessionId = null, onT
       workingDir: agent.workingDir,
       onToolCall: (name, args) => {
         console.log(`  🔧 [${agent.backend}] ${name}(${JSON.stringify(args).substring(0, 100)})`);
-        if (onToolUse) onToolUse(name);
+        if (onToolUse) onToolUse(name, args || {});
       },
-    });
+    };
+    let result;
+    try {
+      result = await runZAI(zaiOpts);
+    } catch (err) {
+      // 429/rate-limit → 키 로테이션 후 1회 재시도
+      if (err.message?.includes('429') || err.message?.includes('rate limit')) {
+        rotateZhipuKey();
+        const newKey = getZhipuApiKey();
+        if (newKey) process.env.ZAI_API_KEY = newKey;
+        console.log('🔄 ZhiPu 키 로테이션 후 재시도...');
+        result = await runZAI(zaiOpts);
+      } else {
+        throw err;
+      }
+    }
     console.log(`  📊 [${agent.backend}] tokens: ${result.usage.prompt_tokens}+${result.usage.completion_tokens}, tools: ${result.toolCalls.length}`);
     return result;
   }
@@ -2810,7 +2848,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.9.21';
+const BOT_VERSION = '2.9.22';
 
 async function checkForUpdates() {
   const config = loadConfig();
