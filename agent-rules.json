@@ -28,6 +28,13 @@
       "zai_model": "glm-5"
     }
   },
+  "smart_routing": {
+    "enabled": true,
+    "cross_module_keywords": ["리팩토링", "전체", "파이프라인 구조", "아키텍처", "크로스", "통합", "마이그레이션", "전면", "구조 변경", "refactor", "architecture"],
+    "single_module_keywords": ["버그", "수정", "추가", "오류", "에러", "fix", "bug", "추가해", "변경해", "고쳐", "넣어", "빼"],
+    "escalation_model": "claude-opus-4-6",
+    "economy_model": "zhipu/glm-5"
+  },
   "agents": {
     "general":              { "channel_id": "1475753369078468630", "model": "claude-sonnet-4-6" },
     "hivemind":             { "channel_id": "1475759262239293481", "model": "claude-opus-4-6" },

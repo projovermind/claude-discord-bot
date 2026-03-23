@@ -191,6 +191,62 @@ function isExclusiveFile(filePath) {
   return excl.some(pattern => filePath.endsWith(pattern) || filePath.includes(pattern));
 }
 
+/**
+ * 스마트 모델 라우팅 — 프롬프트 내용 분석으로 동적 모델 결정.
+ * @param {string} prompt - 사용자 메시지
+ * @param {string} channelDefaultModel - 채널 기본 모델 (agent-rules.json의 model)
+ * @returns {{ model: string, reason: string, label: string } | null}
+ *   null이면 스마트 라우팅 비활성 → 채널 기본 모델 사용
+ */
+function smartRouteModel(prompt, channelDefaultModel) {
+  const rules = loadAgentRules();
+  const sr = rules.smart_routing;
+  if (!sr?.enabled) return null;
+
+  const text = prompt.toLowerCase();
+  const opusModel = sr.escalation_model || rules.model_tiers?.opus?.id;
+  const econModel = sr.economy_model || channelDefaultModel;
+
+  // 1) exclusive_files 키워드 매칭 → 강제 Opus
+  const exclFiles = rules.model_tiers?.opus?.exclusive_files || [];
+  for (const filePath of exclFiles) {
+    // 파일명(확장자 제외) 및 전체 경로 키워드로 매칭
+    const fileName = filePath.split('/').pop().replace(/\.\w+$/, '');
+    if (text.includes(fileName) || text.includes(filePath)) {
+      return {
+        model: opusModel,
+        reason: 'exclusive_files',
+        label: `Opus (exclusive: ${fileName})`,
+      };
+    }
+  }
+
+  // 2) 크로스-모듈 키워드 → Opus 추천
+  const crossKws = sr.cross_module_keywords || [];
+  const crossHit = crossKws.find(kw => text.includes(kw.toLowerCase()));
+  if (crossHit) {
+    return {
+      model: opusModel,
+      reason: 'cross_module',
+      label: `Opus (크로스-모듈: "${crossHit}")`,
+    };
+  }
+
+  // 3) 단일 모듈 키워드 → economy 모델
+  const singleKws = sr.single_module_keywords || [];
+  const singleHit = singleKws.find(kw => text.includes(kw.toLowerCase()));
+  if (singleHit) {
+    return {
+      model: econModel,
+      reason: 'single_module',
+      label: `${econModel.includes('glm') ? 'GLM-5' : econModel} (단일 모듈)`,
+    };
+  }
+
+  // 4) 판단 불가 → null (채널 기본 모델 유지)
+  return null;
+}
+
 // 초기 로드 (파일 없으면 조용히 무시)
 loadAgentRules();
 
@@ -728,21 +784,9 @@ async function handleClaude(message, content) {
 
   // ── Agent Rules: 채널별 모델 라우팅 ──
   const channelModel = getChannelModel(channelId);
-  if (channelModel) {
-    const tier = resolveModelTier(channelModel);
-    if (tier) {
-      agent.model = tier.cliModel;
-      if (tier.backend === 'zai') {
-        agent.backend = 'zai';
-        agent.zaiModel = tier.zaiModel;
-      } else if (agent.backend === 'zai') {
-        delete agent.backend;
-      }
-      console.log(`📐 [모델 라우팅] ch=${channelId} → ${channelModel} (cli: ${tier.cliModel})`);
-    }
-  }
+  let _routingLabel = null;  // 스마트 라우팅 결과 라벨 (진행 메시지에 표시)
 
-  // ── exclusive_files 에스컬레이션: 이전 요청에서 플래그 설정된 경우 opus 승격 ──
+  // 1) 에스컬레이션 최우선 — 이전 요청에서 exclusive_file 수정으로 플래그 설정된 경우
   const prevSession = channelSessions.get(channelId);
   if (prevSession?._escalateNext) {
     const escModel = prevSession._escalateNext;
@@ -751,7 +795,40 @@ async function handleClaude(message, content) {
     if (escTier) {
       agent.model = escTier.cliModel;
       if (agent.backend === 'zai') delete agent.backend;
-      console.log(`⚡ [에스컬레이션] ch=${channelId} → ${escModel} (exclusive_file 수정 후 자동 승격)`);
+      _routingLabel = `Opus (에스컬레이션)`;
+      console.log(`⚡ [에스컬레이션] ch=${channelId} → ${escModel}`);
+    }
+  }
+  // 2) 스마트 라우팅 — 프롬프트 분석 (에스컬레이션 없을 때만)
+  else if (channelModel) {
+    const smartResult = smartRouteModel(prompt, channelModel);
+    if (smartResult) {
+      // 스마트 라우팅 결정 → 해당 모델 적용
+      const tier = resolveModelTier(smartResult.model);
+      if (tier) {
+        agent.model = tier.cliModel;
+        if (tier.backend === 'zai') {
+          agent.backend = 'zai';
+          agent.zaiModel = tier.zaiModel;
+        } else if (agent.backend === 'zai') {
+          delete agent.backend;
+        }
+        _routingLabel = smartResult.label;
+        console.log(`🧠 [스마트 라우팅] ch=${channelId} → ${smartResult.model} (${smartResult.reason}: ${smartResult.label})`);
+      }
+    } else {
+      // 판단 불가 → 채널 기본 모델
+      const tier = resolveModelTier(channelModel);
+      if (tier) {
+        agent.model = tier.cliModel;
+        if (tier.backend === 'zai') {
+          agent.backend = 'zai';
+          agent.zaiModel = tier.zaiModel;
+        } else if (agent.backend === 'zai') {
+          delete agent.backend;
+        }
+        console.log(`📐 [모델 라우팅] ch=${channelId} → ${channelModel} (채널 기본)`);
+      }
     }
   }
 
@@ -810,11 +887,15 @@ async function handleClaude(message, content) {
       description += '\n```\n' + lines.join('\n') + '\n```';
     }
 
+    const footerText = _routingLabel
+      ? `⏱️ ${timeStr} 경과 | 🧠 ${_routingLabel}`
+      : `⏱️ ${timeStr} 경과`;
+
     return {
       color: 0x8B5CF6,
       author: { name: `${agentLabel} 작업 중...` },
       description,
-      footer: { text: `⏱️ ${timeStr} 경과` },
+      footer: { text: footerText },
     };
   };
 
@@ -2729,7 +2810,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.9.20';
+const BOT_VERSION = '2.9.21';
 
 async function checkForUpdates() {
   const config = loadConfig();
