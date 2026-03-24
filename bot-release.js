@@ -868,13 +868,16 @@ async function handleClaude(message, content) {
   const config = loadConfig();
   const channelId = message.channelId;
   const agentId = config.channelBindings[channelId] || 'default';
-  const agent = { ...(config.agents[agentId] || config.agents['default']) };
+  // ⚠️ 깊은 복사 — config 원본 오염 방지 (backend, zaiModel 등이 덮어씌워지는 문제)
+  const agent = JSON.parse(JSON.stringify(config.agents[agentId] || config.agents['default'] || {}));
+  // 원본 backend 보존 (라우팅에서 변경 시 복원용)
+  const _originalBackend = agent.backend || null;
 
   // ── Agent Rules: 채널별 모델 라우팅 ──
   const channelModel = getChannelModel(channelId);
-  let _routingLabel = null;  // 스마트 라우팅 결과 라벨 (진행 메시지에 표시)
+  let _routingLabel = null;
 
-  // 1) 에스컬레이션 최우선 — 이전 요청에서 exclusive_file 수정으로 플래그 설정된 경우
+  // 1) 에스컬레이션 최우선
   const prevSession = channelSessions.get(channelId);
   if (prevSession?._escalateNext) {
     const escModel = prevSession._escalateNext;
@@ -882,50 +885,30 @@ async function handleClaude(message, content) {
     const escTier = resolveModelTier(escModel);
     if (escTier) {
       agent.model = escTier.cliModel;
+      // 에스컬레이션은 항상 Claude → backend 제거
       if (agent.backend === 'zai') delete agent.backend;
       _routingLabel = `Opus (에스컬레이션)`;
       console.log(`⚡ [에스컬레이션] ch=${channelId} → ${escModel}`);
     }
   }
-  // 2) 스마트 라우팅 — 프롬프트 분석 (에스컬레이션 없을 때만)
-  else if (channelModel) {
+  // 2) 스마트 라우팅 (에이전트 원본 backend가 없는 경우에만)
+  // 원본이 zai인 에이전트는 항상 zai 유지, 원본이 없는 에이전트는 항상 Claude 유지
+  else if (channelModel && !_originalBackend) {
+    // backend 없는 에이전트만 스마트 라우팅 (Claude 내에서 모델 변경)
     const smartResult = smartRouteModel(prompt, channelModel);
     if (smartResult) {
-      // 스마트 라우팅 결정 → 해당 모델 적용
       const tier = resolveModelTier(smartResult.model);
-      if (tier) {
-        // Z.ai 백엔드는 키가 있을 때만 사용
-        if (tier.backend === 'zai' && !isBackendAvailable('zai')) {
-          console.log(`⚠️ [라우팅] Z.ai 키 없음 → 기본 모델 유지`);
-        } else {
-          agent.model = tier.cliModel;
-          if (tier.backend === 'zai') {
-            agent.backend = 'zai';
-            agent.zaiModel = tier.zaiModel;
-          } else if (agent.backend === 'zai') {
-            delete agent.backend;
-          }
-          _routingLabel = smartResult.label;
-          console.log(`🧠 [스마트 라우팅] ch=${channelId} → ${smartResult.model} (${smartResult.reason}: ${smartResult.label})`);
-        }
+      if (tier && !tier.backend) {
+        // Claude 모델 내에서만 변경 (zai로 전환 금지)
+        agent.model = tier.cliModel;
+        _routingLabel = smartResult.label;
+        console.log(`🧠 [스마트 라우팅] ch=${channelId} → ${smartResult.model} (${smartResult.label})`);
       }
     } else {
-      // 판단 불가 → 채널 기본 모델
       const tier = resolveModelTier(channelModel);
-      if (tier) {
-        // Z.ai 백엔드는 키가 있을 때만 사용
-        if (tier.backend === 'zai' && !isBackendAvailable('zai')) {
-          console.log(`⚠️ [라우팅] Z.ai 키 없음 → 기본 모델 유지`);
-        } else {
-          agent.model = tier.cliModel;
-          if (tier.backend === 'zai') {
-            agent.backend = 'zai';
-            agent.zaiModel = tier.zaiModel;
-          } else if (agent.backend === 'zai') {
-            delete agent.backend;
-          }
-          console.log(`📐 [모델 라우팅] ch=${channelId} → ${channelModel} (채널 기본)`);
-        }
+      if (tier && !tier.backend) {
+        agent.model = tier.cliModel;
+        console.log(`📐 [모델 라우팅] ch=${channelId} → ${channelModel} (채널 기본)`);
       }
     }
   }
@@ -2952,7 +2935,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '3.0.4';
+const BOT_VERSION = '3.0.5';
 
 async function checkForUpdates() {
   const config = loadConfig();
