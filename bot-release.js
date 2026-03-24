@@ -2057,10 +2057,12 @@ async function runClaude(prompt, systemPrompt, agent = {}, sessionId = null, onT
       throw new Error(`Backend "${agent.backend}" not available. Set ${agent.backend.toUpperCase()}_API_KEY in .env`);
     }
     console.log(`🌐 ${agent.backend} 백엔드 사용: model=${agent.model || 'default'}`);
+    // Z.ai는 도구 ID 패턴 호환 문제로 도구 사용 비활성화
+    const zaiAgent = agent.backend === 'zai' ? { ...agent, allowedTools: [] } : agent;
     const zaiOpts = {
       message: prompt,
       systemPrompt,
-      agent,
+      agent: zaiAgent,
       backend: agent.backend,
       workingDir: agent.workingDir,
       onToolCall: (name, args) => {
@@ -2858,7 +2860,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.9.24';
+const BOT_VERSION = '2.9.25';
 
 async function checkForUpdates() {
   const config = loadConfig();
