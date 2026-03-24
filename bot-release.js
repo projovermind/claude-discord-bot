@@ -959,6 +959,8 @@ async function handleClaude(message, content) {
   updateDashboard();   // 대시보드 갱신
   const startTime = Date.now();
   const toolSteps = [];    // 도구 사용 로그
+  let _latestThought = '';  // Claude의 최신 혼잣말
+  let _toolCount = 0;       // 도구 사용 횟수
   let lastEditTime = 0;    // 디스코드 메시지 수정 쓰로틀
 
   // 진행 상황 임베드 생성
@@ -968,27 +970,30 @@ async function handleClaude(message, content) {
     const sec = elapsed % 60;
     const timeStr = min > 0 ? `${min}분 ${sec}초` : `${sec}초`;
 
-    const statusIcon = toolSteps.length === 0 ? '💭' :
-                       toolSteps[toolSteps.length - 1]?.tool === 'Bash' ? '💻' :
-                       toolSteps[toolSteps.length - 1]?.tool === 'Write' || toolSteps[toolSteps.length - 1]?.tool === 'Edit' ? '✏️' :
-                       '🔍';
+    // 현재 작업 아이콘
+    const lastTool = toolSteps.length > 0 ? toolSteps[toolSteps.length - 1] : null;
+    const statusIcon = !lastTool ? '💭' :
+                       lastTool.tool === 'Bash' ? '💻' :
+                       lastTool.tool === 'Write' || lastTool.tool === 'Edit' ? '✏️' :
+                       lastTool.tool === 'Grep' || lastTool.tool === 'Glob' ? '🔍' :
+                       lastTool.tool === 'Agent' ? '🤖' : '🔧';
 
-    let description = `${statusIcon} `;
-    if (toolSteps.length === 0) description += '요청을 분석하고 있습니다...';
-    else description += `작업 진행 중... (도구 ${toolSteps.length}회 사용)`;
+    let description = '';
 
-    // 최근 도구 로그 (최대 8개)
-    if (toolSteps.length > 0) {
-      const recent = toolSteps.slice(-8);
-      const lines = recent.map((s, i) => {
-        const prefix = i === recent.length - 1 ? '└──' : '├──';
-        return `${prefix} ${s.icon} ${s.tool}${s.detail ? ': ' + s.detail : ''}`;
-      });
-      if (toolSteps.length > 8) lines.unshift(`... +${toolSteps.length - 8}개 이전 작업`);
-      description += '\n```\n' + lines.join('\n') + '\n```';
+    // 혼잣말이 있으면 말풍선 스타일로 표시
+    if (_latestThought) {
+      description += `💬 *${_latestThought}*\n\n`;
     }
 
-    const footerText = `⏱️ ${timeStr} 경과 | 🧠 ${_routingLabel}`;
+    // 현재 수행 중인 작업 (마지막 도구)
+    if (lastTool) {
+      const label = TOOL_LABELS[lastTool.tool] || lastTool.tool;
+      description += `${statusIcon} **${label}** 중${lastTool.detail ? ' — ' + lastTool.detail : ''}`;
+    } else {
+      description += `${statusIcon} 요청을 분석하고 있습니다...`;
+    }
+
+    const footerText = `⏱️ ${timeStr} 경과 | 🧠 ${_routingLabel} | 🔧 도구 ${toolSteps.length}회`;
 
     return {
       color: 0x8B5CF6,
@@ -1025,6 +1030,11 @@ async function handleClaude(message, content) {
     Grep: '🔎', Glob: '📂', Agent: '🤖', WebSearch: '🌐',
     WebFetch: '🌐', TodoWrite: '📋', NotebookEdit: '📓',
   };
+  const TOOL_LABELS = {
+    Read: '파일 읽기', Write: '파일 생성', Edit: '코드 수정', Bash: '명령 실행',
+    Grep: '코드 검색', Glob: '파일 탐색', Agent: '서브 에이전트', WebSearch: '웹 검색',
+    WebFetch: '웹 페이지 조회', TodoWrite: '할 일 정리', NotebookEdit: '노트북 편집',
+  };
 
   let _escalatedToOpus = false;
 
@@ -1032,13 +1042,21 @@ async function handleClaude(message, content) {
     const icon = TOOL_ICONS[toolName] || '⚙️';
     let detail = '';
 
-    // 도구별 요약 추출
+    // 도구별 요약 추출 — 직관적 설명 우선
     if (input) {
-      if (input.file_path) detail = input.file_path.split('/').slice(-2).join('/');
-      else if (input.command) detail = input.command.length > 50 ? input.command.slice(0, 47) + '...' : input.command;
-      else if (input.pattern) detail = `"${input.pattern}"`;
-      else if (input.query) detail = input.query.length > 40 ? input.query.slice(0, 37) + '...' : input.query;
-      else if (input.content && input.file_path) detail = input.file_path.split('/').pop();
+      if (toolName === 'Bash' && input.description) {
+        detail = input.description.length > 50 ? input.description.slice(0, 47) + '...' : input.description;
+      } else if (toolName === 'Agent' && input.description) {
+        detail = input.description.length > 40 ? input.description.slice(0, 37) + '...' : input.description;
+      } else if (input.file_path) {
+        detail = input.file_path.split('/').pop();
+      } else if (input.command) {
+        detail = input.command.length > 50 ? input.command.slice(0, 47) + '...' : input.command;
+      } else if (input.pattern) {
+        detail = `"${input.pattern}"`;
+      } else if (input.query) {
+        detail = input.query.length > 40 ? input.query.slice(0, 37) + '...' : input.query;
+      }
     }
 
     // ── exclusive_files 수정 감지 → 다음 요청 opus 에스컬레이션 ──
@@ -1080,18 +1098,32 @@ async function handleClaude(message, content) {
       if (entry) entry.proc = proc;
     };
 
+    // 혼잣말 캡처 콜백 — 코드블록/JSON/특수문자 필터링
+    const onText = (text) => {
+      const lines = text.trim().split('\n').filter(l => l.trim());
+      // 마지막 줄에서 의미있는 한국어/영어 문장 추출
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const t = lines[i].trim();
+        // 코드블록, JSON, 경로, 특수문자 시작은 건너뜀
+        if (!t || t.startsWith('```') || t.startsWith('{') || t.startsWith('[') || t.startsWith('/') || t.startsWith('#') || t.startsWith('|') || t.startsWith('<')) continue;
+        if (t.length <= 3) continue;
+        _latestThought = t.length <= 80 ? t : t.slice(0, 77) + '...';
+        return;
+      }
+    };
+
     try {
-      result = await runClaude(prompt, systemPrompt, agent, sessionId, onToolUse, onProcSpawn);
+      result = await runClaude(prompt, systemPrompt, agent, sessionId, onToolUse, onProcSpawn, onText);
     } catch (error) {
       // 세션 손상 또는 복원 실패 → 세션 리셋 후 재시도
       if (sessionId && (error.isSessionError || error.message?.includes('signature') || error.message?.includes('400'))) {
         console.log(`⚠️ 세션 손상 감지 (${sessionId.slice(0, 8)}...), 세션 리셋 후 재시도: ${error.message?.slice(0, 80)}`);
         clearSession(channelId);
-        result = await runClaude(prompt, systemPrompt, agent, null, onToolUse, onProcSpawn);
+        result = await runClaude(prompt, systemPrompt, agent, null, onToolUse, onProcSpawn, onText);
       } else if (sessionId) {
         console.log(`⚠️ 세션 복원 실패 (${sessionId.slice(0, 8)}...), 새 세션으로 재시도: ${error.message}`);
         clearSession(channelId);
-        result = await runClaude(prompt, systemPrompt, agent, null, onToolUse, onProcSpawn);
+        result = await runClaude(prompt, systemPrompt, agent, null, onToolUse, onProcSpawn, onText);
       } else {
         throw error;
       }
@@ -1897,7 +1929,7 @@ function invalidateOAuthCache() {
   _oauthTokenExpiry = 0;
 }
 
-function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onToolUse = null, onProcSpawn = null) {
+function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onToolUse = null, onProcSpawn = null, onText = null) {
   return new Promise((resolve, reject) => {
     const stderrChunks = [];
     let settled = false;
@@ -2035,12 +2067,19 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
                     onToolUse(block.name, block.input || {});
                   } else if (block.type === 'text' && block.text) {
                     assistantTexts.push(block.text);
+                    if (onText) onText(block.text);
                   }
                 }
               }
               // 단일 텍스트 필드
-              if (event.message?.text) assistantTexts.push(event.message.text);
-              if (typeof event.text === 'string' && event.text) assistantTexts.push(event.text);
+              if (event.message?.text) {
+                assistantTexts.push(event.message.text);
+                if (onText) onText(event.message.text);
+              }
+              if (typeof event.text === 'string' && event.text) {
+                assistantTexts.push(event.text);
+                if (onText) onText(event.text);
+              }
             } else if (event.type === 'result') {
               // 최종 결과
               resultText = event.result ?? null;
@@ -2172,7 +2211,7 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
   });
 }
 
-async function runClaude(prompt, systemPrompt, agent = {}, sessionId = null, onToolUse = null, onProcSpawn = null) {
+async function runClaude(prompt, systemPrompt, agent = {}, sessionId = null, onToolUse = null, onProcSpawn = null, onText = null) {
   // ── OpenAI-compatible 백엔드 분기 (deepseek, openai, openrouter) ──
   // ⚠️ Z.ai Max 구독은 OpenAI 엔드포인트 사용 불가 → Claude CLI 프록시로 처리
   // Z.ai는 아래 _runClaudeOnce에서 환경변수 주입으로 Anthropic 프록시 사용
@@ -2217,7 +2256,7 @@ async function runClaude(prompt, systemPrompt, agent = {}, sessionId = null, onT
     console.log('⚠️ 인증 실패 상태 — 키체인 토큰 재확인 중...');
     invalidateOAuthCache();
     try {
-      const result = await _runClaudeOnce(prompt, systemPrompt, agent, sessionId, onToolUse, onProcSpawn);
+      const result = await _runClaudeOnce(prompt, systemPrompt, agent, sessionId, onToolUse, onProcSpawn, onText);
       _authFailed = false;
       _authFailNotified = false;
       console.log('✅ 인증 자동 복구됨!');
@@ -2231,7 +2270,7 @@ async function runClaude(prompt, systemPrompt, agent = {}, sessionId = null, onT
   }
 
   try {
-    return await _runClaudeOnce(prompt, systemPrompt, agent, sessionId, onToolUse, onProcSpawn);
+    return await _runClaudeOnce(prompt, systemPrompt, agent, sessionId, onToolUse, onProcSpawn, onText);
   } catch (err) {
     if (!err.isAuthError) throw err;
 
@@ -2241,7 +2280,7 @@ async function runClaude(prompt, systemPrompt, agent = {}, sessionId = null, onT
     await new Promise(r => setTimeout(r, 5000));
 
     try {
-      const result = await _runClaudeOnce(prompt, systemPrompt, agent, sessionId, onToolUse, onProcSpawn);
+      const result = await _runClaudeOnce(prompt, systemPrompt, agent, sessionId, onToolUse, onProcSpawn, onText);
       console.log('✅ 재시도 성공 — 인증 자동 갱신됨');
       return result;
     } catch (retryErr) {
@@ -2949,7 +2988,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '3.0.5';
+const BOT_VERSION = '3.0.9';
 
 async function checkForUpdates() {
   const config = loadConfig();
@@ -3163,6 +3202,7 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
 
   // 위임 에이전트 모델 라벨
   let _delegateModelLabel = getModelDisplayLabel(targetAgent.model || 'opus') || 'Claude Opus';
+  let _delegateThought = '';  // 위임 에이전트의 혼잣말
 
   // 위임받은 채널에 진행 임베드 표시
   let progressMsg = null;
@@ -3171,7 +3211,7 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
       embeds: [{
         color: 0x8B5CF6,
         author: { name: `${agentLabel} 작업 중...` },
-        description: `🤝 **${sourceAgent}**로부터 위임받은 작업\n🔍 분석 중... (도구 0회 사용)\n\n\`${task.slice(0, 150)}\``,
+        description: `🤝 **${sourceAgent}**로부터 위임받은 작업\n💭 요청을 분석하고 있습니다...\n\n\`${task.slice(0, 150)}\``,
         footer: { text: `⏱️ 0초 경과 | 🧠 ${_delegateModelLabel}` },
       }],
     });
@@ -3190,18 +3230,34 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     const sec = elapsed % 60;
     const timeStr = min > 0 ? `${min}분 ${sec}초` : `${sec}초`;
 
-    // 최근 5개 도구만 표시
-    const recent = toolSteps.slice(-5);
-    const toolLines = recent.map(s => `└─ ${s.icon} ${s.tool}${s.detail ? ': ' + s.detail : ''}`).join('\n');
-    const older = toolSteps.length > 5 ? `... +${toolSteps.length - 5}개 이전 작업\n` : '';
+    // 혼잣말 + 현재 작업 표시
+    const TOOL_LABELS_D = {
+      Read: '파일 읽기', Write: '파일 생성', Edit: '코드 수정', Bash: '명령 실행',
+      Grep: '코드 검색', Glob: '파일 탐색', Agent: '서브 에이전트', WebSearch: '웹 검색',
+      WebFetch: '웹 페이지 조회', TodoWrite: '할 일 정리', NotebookEdit: '노트북 편집',
+    };
+    const lastTool = toolSteps.length > 0 ? toolSteps[toolSteps.length - 1] : null;
+    const toolIcon = !lastTool ? '💭' :
+                     lastTool.tool === 'Bash' ? '💻' :
+                     lastTool.tool === 'Edit' || lastTool.tool === 'Write' ? '✏️' :
+                     lastTool.tool === 'Agent' ? '🤖' : '🔧';
+
+    let desc = '';
+    if (_delegateThought) desc += `💬 *${_delegateThought}*\n\n`;
+    if (lastTool) {
+      const label = TOOL_LABELS_D[lastTool.tool] || lastTool.tool;
+      desc += `${toolIcon} **${label}** 중${lastTool.detail ? ' — ' + lastTool.detail : ''}`;
+    } else {
+      desc += `💭 요청을 분석하고 있습니다...`;
+    }
 
     try {
       await progressMsg.edit({
         embeds: [{
           color: 0x8B5CF6,
           author: { name: `${agentLabel} 작업 중...` },
-          description: `🔧 작업 진행 중... (도구 ${toolSteps.length}회 사용)\n\n\`\`\`\n${older}${toolLines || '분석 중...'}\n\`\`\``,
-          footer: { text: `⏱️ ${timeStr} 경과 | 🧠 ${_delegateModelLabel}` },
+          description: desc,
+          footer: { text: `⏱️ ${timeStr} 경과 | 🧠 ${_delegateModelLabel} | 🔧 도구 ${toolSteps.length}회` },
         }],
       });
     } catch {}
@@ -3214,14 +3270,23 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     const onToolUse = (toolName, input) => {
       const icon = TOOL_ICONS_D[toolName] || '⚙️';
       let detail = '';
-      if (input?.file_path) detail = input.file_path.split('/').slice(-2).join('/');
-      else if (input?.command) detail = input.command.length > 40 ? input.command.slice(0, 37) + '...' : input.command;
-      else if (input?.pattern) detail = `"${input.pattern}"`;
+      if (toolName === 'Bash' && input?.description) {
+        detail = input.description.length > 45 ? input.description.slice(0, 42) + '...' : input.description;
+      } else if (toolName === 'Agent' && input?.description) {
+        detail = input.description.length > 40 ? input.description.slice(0, 37) + '...' : input.description;
+      } else if (input?.file_path) {
+        detail = input.file_path.split('/').pop();
+      } else if (input?.command) {
+        detail = input.command.length > 40 ? input.command.slice(0, 37) + '...' : input.command;
+      } else if (input?.pattern) {
+        detail = `"${input.pattern}"`;
+      }
 
       toolSteps.push({ icon, tool: toolName, detail });
 
+      const label = TOOL_LABELS_D[toolName] || toolName;
       const proc = activeProcesses.get(delegateKey);
-      if (proc) proc.currentTool = `${icon} ${toolName}${detail ? ': ' + detail.slice(0, 25) : ''}`;
+      if (proc) proc.currentTool = `${icon} ${label}${detail ? ' — ' + detail.slice(0, 25) : ''}`;
     };
 
     const onProcSpawn = (proc) => {
@@ -3239,7 +3304,17 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     const delegateSessionId = targetChannelId ? getSessionId(targetChannelId) : null;
     let result;
     try {
-      result = await _runClaudeOnce(task, systemPrompt, targetAgent, delegateSessionId, onToolUse, onProcSpawn);
+      const onDelegateText = (text) => {
+        const lines = text.trim().split('\n').filter(l => l.trim());
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const t = lines[i].trim();
+          if (!t || t.startsWith('```') || t.startsWith('{') || t.startsWith('[') || t.startsWith('/') || t.startsWith('#') || t.startsWith('|') || t.startsWith('<')) continue;
+          if (t.length <= 3) continue;
+          _delegateThought = t.length <= 80 ? t : t.slice(0, 77) + '...';
+          return;
+        }
+      };
+      result = await _runClaudeOnce(task, systemPrompt, targetAgent, delegateSessionId, onToolUse, onProcSpawn, onDelegateText);
     } catch (err) {
       if (delegateSessionId && (err.isSessionError || err.message?.includes('signature') || err.message?.includes('400'))) {
         console.log(`⚠️ 위임 세션 손상 → 새 세션으로 재시도`);
