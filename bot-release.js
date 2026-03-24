@@ -1653,9 +1653,9 @@ async function handleZaiSetup(message, content) {
 
     // 2. 에이전트 생성 (없으면)
     if (!config.agents) config.agents = {};
-    if (!config.agents.zai_hivemind) {
-      config.agents.zai_hivemind = {
-        name: 'Z.ai 하이브마인드',
+    if (!config.agents.zai) {
+      config.agents.zai = {
+        name: 'Z.ai',
         avatar: '🧿',
         systemPrompt: '당신은 Z.ai GLM-5 기반 AI 어시스턴트입니다. 한국어로 답변하세요. 요청에 대해 확인 질문 없이 바로 실행하고, 결과를 구체적으로 알려주세요.',
         workingDir: process.cwd(),
@@ -1667,24 +1667,19 @@ async function handleZaiSetup(message, content) {
 
     // 3. 채널 생성 (없으면)
     let zaiChannel = guild.channels.cache.find(
-      ch => ch.name.includes('zai') && ch.name.includes('하이브마인드')
+      ch => ch.name.includes('zai') && ch.type === 0
     );
     if (!zaiChannel) {
-      // 기존 카테고리 찾기 (하이브마인드 있는 카테고리)
-      const hivemindCh = guild.channels.cache.find(ch => ch.name.includes('하이브마인드'));
-      const parentId = hivemindCh?.parentId || null;
-
       zaiChannel = await guild.channels.create({
-        name: '🧿zai-하이브마인드',
+        name: '🧿z-ai',
         type: 0, // GuildText
         topic: 'Z.ai GLM-5 에이전트 — 자동 생성됨',
-        parent: parentId,
       });
     }
 
     // 4. 채널 바인딩
     if (!config.channelBindings) config.channelBindings = {};
-    config.channelBindings[zaiChannel.id] = 'zai_hivemind';
+    config.channelBindings[zaiChannel.id] = 'zai';
 
     // 5. config 저장
     saveConfig(config);
@@ -1694,7 +1689,7 @@ async function handleZaiSetup(message, content) {
 
     await message.channel.send(
       `✅ Z.ai 설정 완료!\n\n` +
-      `🧿 **에이전트**: Z.ai 하이브마인드 (GLM-5)\n` +
+      `🧿 **에이전트**: Z.ai (GLM-5)\n` +
       `💬 **채널**: <#${zaiChannel.id}>\n\n` +
       `해당 채널에서 바로 대화하면 GLM-5가 응답합니다.`
     );
