@@ -235,10 +235,20 @@ function resolveModelTier(modelStr) {
  */
 function getModelDisplayLabel(modelStr) {
   if (!modelStr) return null;
-  const m = modelStr.toLowerCase();
-  if (m.includes('opus')) return 'Claude Opus';
-  if (m.includes('sonnet')) return 'Claude Sonnet';
-  if (m.includes('haiku')) return 'Claude Haiku';
+  let m = modelStr.toLowerCase();
+
+  // 짧은 티어명('opus','sonnet','haiku')이면 model_tiers에서 full ID 조회
+  const rules = loadAgentRules();
+  const tierDef = (rules.model_tiers || {})[m];
+  if (tierDef?.id) m = tierDef.id.toLowerCase();
+
+  // 버전 추출: 'claude-opus-4-6' → '4.6', 'claude-haiku-4-5-20251001' → '4.5'
+  const verMatch = m.match(/(\d+)-(\d+)(?:-\d{8,})?$/);
+  const ver = verMatch ? `${verMatch[1]}.${verMatch[2]}` : null;
+
+  if (m.includes('opus')) return `Claude Opus${ver ? ' ' + ver : ''}`;
+  if (m.includes('sonnet')) return `Claude Sonnet${ver ? ' ' + ver : ''}`;
+  if (m.includes('haiku')) return `Claude Haiku${ver ? ' ' + ver : ''}`;
   if (m.includes('glm')) return 'GLM-5';
   return modelStr;
 }
