@@ -1924,9 +1924,22 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
       cleanEnv.PATH = extraPaths.join(':') + ':' + cleanEnv.PATH;
     }
 
-    // Claude 기본: CLI가 자체적으로 키체인에서 읽고 refresh
-    // Z.ai는 runClaude()에서 분기되어 zai_runner.js 통해 직접 호출됨
-    delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN;
+    // Z.ai Max 구독: Claude CLI를 Z.ai Anthropic 프록시로 우회
+    if (agent.backend === 'zai') {
+      const zaiKey = process.env.ZAI_API_KEY;
+      if (zaiKey) {
+        cleanEnv.ANTHROPIC_AUTH_TOKEN = zaiKey;
+        cleanEnv.ANTHROPIC_BASE_URL = 'https://api.z.ai/api/anthropic';
+        cleanEnv.API_TIMEOUT_MS = '300000';
+        delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN;
+        console.log(`🧿 Z.ai Anthropic 프록시 사용`);
+      } else {
+        console.log(`⚠️ ZAI_API_KEY 없음 — 기본 Claude로 폴백`);
+      }
+    } else {
+      // Claude 기본: CLI가 자체적으로 키체인에서 읽고 refresh
+      delete cleanEnv.CLAUDE_CODE_OAUTH_TOKEN;
+    }
 
     // stream-json 모드: 실시간 도구 사용 이벤트 수신 가능 (--verbose 필수)
     const useStream = !!onToolUse;
@@ -2150,9 +2163,10 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
 }
 
 async function runClaude(prompt, systemPrompt, agent = {}, sessionId = null, onToolUse = null, onProcSpawn = null) {
-  // ── OpenAI-compatible 백엔드 분기 (zai, deepseek, openai, openrouter) ──
-  // Z.ai는 직접 GLM-5 API 호출 (Claude CLI 프록시 방식은 thinking block 오류 발생)
-  if (agent.backend && agent.backend !== 'claude') {
+  // ── OpenAI-compatible 백엔드 분기 (deepseek, openai, openrouter) ──
+  // ⚠️ Z.ai Max 구독은 OpenAI 엔드포인트 사용 불가 → Claude CLI 프록시로 처리
+  // Z.ai는 아래 _runClaudeOnce에서 환경변수 주입으로 Anthropic 프록시 사용
+  if (agent.backend && agent.backend !== 'claude' && agent.backend !== 'zai') {
     if (!isBackendAvailable(agent.backend)) {
       throw new Error(`Backend "${agent.backend}" not available. Set ${agent.backend.toUpperCase()}_API_KEY in .env`);
     }
