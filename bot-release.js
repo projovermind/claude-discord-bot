@@ -933,9 +933,27 @@ async function handleClaude(message, content) {
     _routingLabel = getModelDisplayLabel(finalModel);
   }
 
-  // 채널 단위 동시 실행 제어 — 최대 동시 작업 수 초과 시 큐에 추가
+  // 채널 단위 동시 실행 제어 — 실행 중이면 stdin 주입 시도, 불가 시 큐
   const currentTasks = getTaskCount(channelId);
   if (currentTasks >= MAX_CONCURRENT_PER_CHANNEL) {
+    // 실행 중인 프로세스 찾기 — stdin으로 실시간 메시지 주입 시도
+    let injected = false;
+    for (const [, entry] of activeProcesses) {
+      if (entry.channelId === channelId && entry.proc?.stdin?.writable) {
+        try {
+          const stdinMsg = JSON.stringify({ type: 'user_message', content: prompt }) + '\n';
+          entry.proc.stdin.write(stdinMsg);
+          injected = true;
+          await message.reply(`💬 작업 중인 ${entry.agentLabel}에게 전달했습니다. 참고하면서 작업합니다.`);
+          break;
+        } catch (e) {
+          console.log(`⚠️ stdin 주입 실패: ${e.message}`);
+        }
+      }
+    }
+    if (injected) return;
+
+    // stdin 주입 불가 시 기존 큐 방식 폴백
     const queue = getQueue(channelId);
     if (queue.length >= MAX_QUEUE_SIZE) {
       await message.reply(`⚠️ 대기열이 가득 찼습니다 (최대 ${MAX_QUEUE_SIZE}개). 현재 작업 완료 후 다시 시도해주세요.`);
@@ -1964,7 +1982,7 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
     const useStream = !!onToolUse;
     const args = ['-p'];
     if (useStream) {
-      args.push('--verbose', '--output-format', 'stream-json');
+      args.push('--verbose', '--output-format', 'stream-json', '--input-format', 'stream-json');
     } else {
       args.push('--output-format', 'json');
     }
@@ -2011,7 +2029,7 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
     const proc = spawn(CLAUDE_BIN, args, {
       env: cleanEnv,
       cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [useStream ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
 
     // 2시간 타임아웃
