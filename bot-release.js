@@ -560,7 +560,8 @@ actions: sendMessage(channel,content), createChannel(name,channelType), deleteCh
 - Plan 모드 진입 금지. 바로 구현.
 - 자기 채널 요청은 끝까지 책임. 떠넘기기 금지.
 - 완료 시 수정 파일 목록 + 변경 요약 + 테스트 결과 포함.
-- 봇 프로세스 관리 절대 금지: kill, pkill, pgrep, killall, launchctl, nohup node bot.js, pm2, systemctl 등 프로세스 관리 명령어 사용 시 봇이 죽습니다. 절대 실행하지 마세요.
+- 봇 프로세스 관리: canRestartBot 권한이 있는 에이전트만 봇 재시작 가능합니다. 재시작 방법: launchctl bootout gui/$(id -u)/com.claude.discord.bot && sleep 2 && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude.discord.bot.plist
+- canRestartBot 권한이 없으면: kill, pkill, pgrep, killall, launchctl 등 프로세스 관리 명령어 절대 금지.
 - config.json, .env, .sessions.json, PID 파일 삭제/초기화 금지.
 - 대화/인사/안부는 도구 없이 바로 답변.
 - 세션 연속: !reset까지 대화 이어감. "모르겠습니다" 금지.
@@ -1943,11 +1944,15 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
     }
 
     // 🛡️ 위험 명령 차단 (봇 프로세스 kill 방지)
-    const disallowed = [
-      'Bash(kill:*)', 'Bash(pkill:*)', 'Bash(pgrep:*)',
-      'Bash(killall:*)', 'Bash(launchctl:*)',
-      'Bash(rm -rf /Volumes:*)', 'Bash(rm -rf ~:*)'
-    ];
+    // canRestartBot 권한이 있는 에이전트는 프로세스 관리 허용
+    const disallowed = [];
+    if (!agent.canRestartBot) {
+      disallowed.push(
+        'Bash(kill:*)', 'Bash(pkill:*)', 'Bash(pgrep:*)',
+        'Bash(killall:*)', 'Bash(launchctl:*)'
+      );
+    }
+    disallowed.push('Bash(rm -rf /Volumes:*)', 'Bash(rm -rf ~:*)');
 
     // 에이전트별 차단 도구 (config.json의 disallowedTools)
     if (agent.disallowedTools && agent.disallowedTools.length > 0) {
