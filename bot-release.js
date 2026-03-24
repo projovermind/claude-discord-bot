@@ -559,7 +559,10 @@ actions: sendMessage(channel,content), createChannel(name,channelType), deleteCh
 - Plan 모드 진입 금지. 바로 구현.
 - 자기 채널 요청은 끝까지 책임. 떠넘기기 금지.
 - 완료 시 수정 파일 목록 + 변경 요약 + 테스트 결과 포함.
-- 봇 프로세스 관리: canRestartBot 권한이 있는 에이전트만 봇 재시작 가능합니다. 재시작 방법: launchctl bootout gui/$(id -u)/com.claude.discord.bot && sleep 2 && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude.discord.bot.plist
+- 봇 프로세스 관리: canRestartBot 권한이 있는 에이전트만 봇 재시작 가능.
+  재시작 방법: pkill -f "node.*bot\\.js" (봇은 KeepAlive로 자동 부활)
+  ⚠️ 절대 작업 도중에 봇을 재시작하지 마세요! 반드시 모든 코드 수정이 끝나고, 최종 답변을 보낸 후에만 재시작하세요.
+  ⚠️ launchctl bootout은 사용하지 마세요. pkill만 사용하세요.
 - canRestartBot 권한이 없으면: kill, pkill, pgrep, killall, launchctl 등 프로세스 관리 명령어 절대 금지.
 - config.json, .env, .sessions.json, PID 파일 삭제/초기화 금지.
 - Claude CLI 명령어(plugin install 등)를 실행할 때는 반드시 \`env -u CLAUDECODE claude ...\`로 실행하세요. CLAUDECODE 환경변수를 제거해야 중첩 실행 차단이 우회됩니다.
