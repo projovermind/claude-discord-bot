@@ -1129,7 +1129,7 @@ async function handleClaude(message, content) {
           color: 0x22C55E,
           author: { name: `${agentLabel} 작업 완료` },
           description: completionDesc.join('\n'),
-          footer: { text: `⏱️ ${timeStr} 소요` },
+          footer: { text: `⏱️ ${timeStr} 소요 | 🧠 ${_routingLabel}` },
         }] });
       } catch {}
     }
@@ -1205,7 +1205,7 @@ async function handleClaude(message, content) {
               color: 0x22C55E,
               author: { name: `${agentLabel} 위임 완료` },
               description: `${delegateDesc}\n📊 ${delegations.length}개 에이전트 동시 위임`,
-              footer: { text: `⏱️ ${timeStr} 소요` },
+              footer: { text: `⏱️ ${timeStr} 소요 | 🧠 ${_routingLabel}` },
             }] });
           } catch {}
         }
@@ -1250,7 +1250,7 @@ async function handleClaude(message, content) {
           color: 0xEF4444,
           author: { name: `${agentLabel} 오류 발생` },
           description: `❌ ${error.message}`,
-          footer: { text: `도구 ${toolSteps.length}회 사용` },
+          footer: { text: `도구 ${toolSteps.length}회 사용 | 🧠 ${_routingLabel}` },
         }] });
       } catch {}
     }
@@ -2925,7 +2925,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '3.0.2';
+const BOT_VERSION = '3.0.3';
 
 async function checkForUpdates() {
   const config = loadConfig();
@@ -3137,6 +3137,9 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     Grep: '🔎', Glob: '📂', Agent: '🤖', WebSearch: '🌐',
   };
 
+  // 위임 에이전트 모델 라벨
+  const _delegateModelLabel = getModelDisplayLabel(targetAgent.model || 'opus') || 'Claude Opus';
+
   // 위임받은 채널에 진행 임베드 표시
   let progressMsg = null;
   try {
@@ -3145,7 +3148,7 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
         color: 0x8B5CF6,
         author: { name: `${agentLabel} 작업 중...` },
         description: `🤝 **${sourceAgent}**로부터 위임받은 작업\n🔍 분석 중... (도구 0회 사용)\n\n\`${task.slice(0, 150)}\``,
-        footer: { text: '⏱️ 0초 경과' },
+        footer: { text: `⏱️ 0초 경과 | 🧠 ${_delegateModelLabel}` },
       }],
     });
   } catch {}
@@ -3174,7 +3177,7 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
           color: 0x8B5CF6,
           author: { name: `${agentLabel} 작업 중...` },
           description: `🔧 작업 진행 중... (도구 ${toolSteps.length}회 사용)\n\n\`\`\`\n${older}${toolLines || '분석 중...'}\n\`\`\``,
-          footer: { text: `⏱️ ${timeStr} 경과` },
+          footer: { text: `⏱️ ${timeStr} 경과 | 🧠 ${_delegateModelLabel}` },
         }],
       });
     } catch {}
@@ -3247,7 +3250,7 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
             color: 0x22C55E,
             author: { name: `${agentLabel} 작업 완료` },
             description: completionDesc.join('\n'),
-            footer: { text: `⏱️ ${timeStr} 소요` },
+            footer: { text: `⏱️ ${timeStr} 소요 | 🧠 ${_delegateModelLabel}` },
           }],
         });
       } catch {}
