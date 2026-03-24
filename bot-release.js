@@ -2914,42 +2914,20 @@ async function updateDashboard() {
 //  📋 CHANGELOG (자동 업데이트 시 표시)
 // ─────────────────────────────────────────
 /*CHANGELOG_START
-## v2.9.19
-- 🧠 위임받은 에이전트가 기존 세션을 이어가도록 수정 (컨텍스트 유지)
-- 위임 완료 후 세션ID 저장 → 다음 위임에서도 이전 대화 참조 가능
-
-## v2.9.18
-- 🔧 JSON 파싱 버그 수정: 문자열 내부 중괄호로 인한 파싱 실패 해결
-- 🤝 위임 감지 정규식 제거 → tryParseJSON 통합으로 안정성 향상
-- delegate 응답이 텍스트와 섞여 있어도 정확히 감지/처리
-
-## v2.9.17
-- 📊 !status 명령어: 에이전트 상태/세션/통계 빠른 확인
-- 📨 대용량 파일 Telegram 전송: Discord 10MB 초과 시 자동 우회
-- 🔄 위임 결과 반환: returnResult로 위임 결과를 원래 채널에 보고
-- 📝 세션 로테이션 시 공유 노트에 요약 자동 저장
-
-## v2.9.16
-- 📝 프로젝트별 공유 노트 시스템 (shared_notes.json)
-- 에이전트 간 핵심 정보 공유 (분석 결과, 파일 경로, 설정 변경 등)
-- 프로젝트 루트 자동 감지, 시스템 프롬프트에 사용법 자동 주입
-
-## v2.9.15
-- 🔀 컨텍스트 합류 큐: 작업 중 들어온 메시지를 합쳐서 이전 세션에서 이어 처리
-- 🔧 대시보드 위임 상태 미감지 버그 수정
-- ⚡ taskId 기반 프로세스 추적으로 키 충돌 방지
-
-## v2.9.14
-- 🔀 채널별 병렬 작업 지원 (MAX_CONCURRENT_PER_CHANNEL)
-- 🛑 !stop으로 채널 내 모든 활성 작업 중단
-- 📊 대시보드에 동시 작업 수 표시 (⚡×N)
-
-## v2.9.13
-- 🔗 자동 업데이트 URL 하드코드 fallback 추가
+## v3.0.1
+- 🧿 !zai 원클릭 Z.ai 에이전트 생성 (채널+바인딩 자동)
+- 🔧 세션 손상 자동 감지 및 복구 (thinking signature 에러)
+- 🤝 병렬 다중 에이전트 위임 (delegates 배열)
+- 🛡️ 프로세스 보호 (disallowedTools로 kill/pkill 차단)
+- 📊 프로젝트별 실시간 대시보드
+- 🔄 자동 업데이트 시스템 (매일 오전 9시 체크)
+- 🧿 Z.ai 기본 모델: GLM-5
 
 ## v2.9.12
-- 🔄 자동 업데이트 시스템 수정
-- 🤝 병렬 다중 에이전트 위임 지원
+- 🔄 자동 업데이트 시스템 구축
+- 🤝 에이전트 위임 시 답변 즉시 전송 후 종료
+- 📝 세션 자동 요약 + 리셋 (100턴)
+- 💬 간단한 대화에 도구 사용 방지
 CHANGELOG_END*/
 
 // ─────────────────────────────────────────
@@ -3021,31 +2999,21 @@ async function checkForUpdates() {
           .setStyle(ButtonStyle.Secondary),
       );
 
-      // 변경사항 추출 (CHANGELOG 블록에서 새 버전 내역만)
+      // 변경사항 추출 (CHANGELOG 블록에서 최근 2개 버전)
       let changelog = '';
       const clBlock = remoteCode.match(/\/\*CHANGELOG_START\n([\s\S]*?)CHANGELOG_END\*\//);
       if (clBlock) {
-        // 새 버전의 섹션만 추출 (## vX.X.X ~ 다음 ## 전까지)
         const sections = clBlock[1].split(/^## /m).filter(s => s.trim());
-        // 현재 버전보다 새로운 섹션들만 모으기
-        const newSections = [];
-        for (const sec of sections) {
-          const verMatch = sec.match(/^v?([\d.]+)/);
-          if (verMatch && verMatch[1] !== BOT_VERSION) {
-            // 버전 비교: 새 버전이면 포함
-            const lines = sec.trim().split('\n');
-            const verTitle = lines[0].trim();
-            const items = lines.slice(1).map(l => l.trim()).filter(l => l.startsWith('-'));
-            if (items.length > 0) {
-              newSections.push(`**v${verTitle}**\n${items.join('\n')}`);
-            }
-          }
-        }
-        changelog = newSections.length > 0 ? newSections.join('\n\n') : '변경 내역 없음';
+        // 최근 2개 섹션만 표시
+        const recentSections = sections.slice(0, 2).map(sec => {
+          const lines = sec.trim().split('\n');
+          const verTitle = lines[0].trim();
+          const items = lines.slice(1).map(l => l.trim()).filter(l => l.startsWith('-'));
+          return items.length > 0 ? `**v${verTitle}**\n${items.join('\n')}` : null;
+        }).filter(Boolean);
+        changelog = recentSections.length > 0 ? recentSections.join('\n\n') : '변경 내역 없음';
       } else {
-        // fallback: 기존 한줄 방식
-        const changelogMatch = remoteCode.match(/\/\/ CHANGELOG: (.+)/);
-        changelog = changelogMatch ? changelogMatch[1] : '변경 내역 없음';
+        changelog = '변경 내역 없음';
       }
 
       await notifyChannel.send({
