@@ -369,7 +369,7 @@ function markMessageProcessed(messageId) {
 // ── 대화 세션 관리 (채널별 컨텍스트 유지, 디스크 영구 저장) ──────
 const SESSION_FILE = path.join(__dirname, '.sessions.json');
 const channelSessions = new Map(); // channelId -> { sessionId, lastUsed, turnCount, summary }
-const SESSION_TTL = 0; // 수동 초기화(!reset) 전까지 세션 영구 유지
+const SESSION_TTL = 30 * 60 * 1000; // 30분 — 긴 세션은 tool_use ID 오류 유발
 const SESSION_MAX_TURNS = 30; // 30턴 후 자동 요약 + 리셋 (컨텍스트 비대화 방지)
 
 // 시작 시 디스크에서 세션 복원
@@ -1033,8 +1033,12 @@ async function handleClaude(message, content) {
     try {
       result = await runClaude(prompt, systemPrompt, agent, sessionId, onToolUse, onProcSpawn);
     } catch (error) {
-      // 세션 복원 실패 시 새 세션으로 재시도
-      if (sessionId) {
+      // 세션 손상 또는 복원 실패 → 세션 리셋 후 재시도
+      if (sessionId && (error.isSessionError || error.message?.includes('signature') || error.message?.includes('400'))) {
+        console.log(`⚠️ 세션 손상 감지 (${sessionId.slice(0, 8)}...), 세션 리셋 후 재시도: ${error.message?.slice(0, 80)}`);
+        clearSession(channelId);
+        result = await runClaude(prompt, systemPrompt, agent, null, onToolUse, onProcSpawn);
+      } else if (sessionId) {
         console.log(`⚠️ 세션 복원 실패 (${sessionId.slice(0, 8)}...), 새 세션으로 재시도: ${error.message}`);
         clearSession(channelId);
         result = await runClaude(prompt, systemPrompt, agent, null, onToolUse, onProcSpawn);
@@ -1715,7 +1719,7 @@ async function handleHookCommand(message, content) {
 // ── OAuth 인증 상태 관리 ──
 let _authFailed = false;           // 현재 인증 실패 상태
 let _authFailNotified = false;     // 알림 전송 여부 (중복 알림 방지)
-const AUTH_ALERT_CHANNEL = null; // 릴리즈용 (알림 비활성) // 인증 알림 채널 (하이브마인드)
+const AUTH_ALERT_CHANNEL = null; // 인증 알림 채널 (하이브마인드)
 
 function isAuthError(output, stderrOutput) {
   const combined = (output + ' ' + stderrOutput).toLowerCase();
@@ -1961,6 +1965,17 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
         if (isAuthError(finalText || '', stderrOutput)) {
           const err = new Error('OAuth 토큰 만료');
           err.isAuthError = true;
+          reject(err);
+          return;
+        }
+
+        // thinking signature / invalid_request_error → 세션 깨짐, 새 세션 필요
+        if (finalText && (finalText.includes('Invalid `signature` in `thinking`') ||
+            finalText.includes('invalid_request_error') ||
+            finalText.includes('API Error: 400'))) {
+          const err = new Error(finalText.slice(0, 200));
+          err.isSessionError = true;
+          console.log(`⚠️ 세션 손상 감지 → 새 세션으로 재시도 필요`);
           reject(err);
           return;
         }
