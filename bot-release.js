@@ -237,10 +237,12 @@ function getModelDisplayLabel(modelStr) {
   if (!modelStr) return null;
   let m = modelStr.toLowerCase();
 
-  // 짧은 티어명('opus','sonnet','haiku')이면 model_tiers에서 full ID 조회
+  // 짧은 티어명 → full ID 조회 (agent-rules.json 우선, 없으면 기본값)
+  const DEFAULT_TIERS = { opus: 'claude-opus-4-6', sonnet: 'claude-sonnet-4-6', haiku: 'claude-haiku-4-5' };
   const rules = loadAgentRules();
   const tierDef = (rules.model_tiers || {})[m];
   if (tierDef?.id) m = tierDef.id.toLowerCase();
+  else if (DEFAULT_TIERS[m]) m = DEFAULT_TIERS[m];
 
   // 버전 추출: 'claude-opus-4-6' → '4.6', 'claude-haiku-4-5-20251001' → '4.5'
   const verMatch = m.match(/(\d+)-(\d+)(?:-\d{8,})?$/);
