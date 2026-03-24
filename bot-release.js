@@ -2960,7 +2960,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.9.25';
+const BOT_VERSION = '3.0.1';
 
 async function checkForUpdates() {
   const config = loadConfig();
