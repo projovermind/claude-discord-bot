@@ -894,35 +894,32 @@ async function handleClaude(message, content) {
     }
   }
   // 2) 스마트 라우팅 (에이전트 원본 backend가 없는 경우에만)
-  // 원본이 zai인 에이전트는 항상 zai 유지
+  // ⚠️ 핵심 규칙: 원본 backend가 없는 에이전트에는 절대 backend를 추가하지 않음
+  //    → Claude 에이전트가 Z.ai로 바뀌는 문제 완전 차단
   else if (channelModel && !_originalBackend) {
     const smartResult = smartRouteModel(prompt, channelModel);
     if (smartResult) {
       const tier = resolveModelTier(smartResult.model);
       if (tier) {
+        // backend가 다른 모델은 무시 — Claude 에이전트는 Claude만 사용
         if (tier.backend) {
-          // ZAI 백엔드 모델 적용 (agent-rules.json이 GLM-5 등을 지정한 경우)
-          agent.backend = tier.backend;
-          agent.model = tier.cliModel;
-          if (tier.zaiModel) agent.zaiModel = tier.zaiModel;
+          console.log(`⚠️ [스마트 라우팅] backend 변경 차단: ${tier.backend} → Claude 유지`);
         } else {
           agent.model = tier.cliModel;
+          _routingLabel = smartResult.label;
+          console.log(`🧠 [스마트 라우팅] ch=${channelId} → ${smartResult.model} (${smartResult.label})`);
         }
-        _routingLabel = smartResult.label;
-        console.log(`🧠 [스마트 라우팅] ch=${channelId} → ${smartResult.model} (${smartResult.label})`);
       }
     } else {
       const tier = resolveModelTier(channelModel);
       if (tier) {
+        // backend가 다른 모델은 무시
         if (tier.backend) {
-          // ZAI 백엔드 모델 적용
-          agent.backend = tier.backend;
-          agent.model = tier.cliModel;
-          if (tier.zaiModel) agent.zaiModel = tier.zaiModel;
+          console.log(`⚠️ [모델 라우팅] backend 변경 차단: ${tier.backend} → Claude 유지`);
         } else {
           agent.model = tier.cliModel;
+          console.log(`📐 [모델 라우팅] ch=${channelId} → ${channelModel} (채널 기본)`);
         }
-        console.log(`📐 [모델 라우팅] ch=${channelId} → ${channelModel} (채널 기본)`);
       }
     }
   }
@@ -3006,7 +3003,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '3.0.9';
+const BOT_VERSION = '3.0.10';
 
 async function checkForUpdates() {
   const config = loadConfig();
