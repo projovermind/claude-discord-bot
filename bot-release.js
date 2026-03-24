@@ -43,17 +43,16 @@ function acquireLock() {
         try {
           process.kill(existingPid, 0); // 프로세스 존재 여부 확인 (시그널 미전송)
           // 프로세스가 살아있음 → 이전 인스턴스 강제 종료
-          console.log(`⚠️ 이전 인스턴스 발견 (PID: ${existingPid}), 종료 시도...`);
+          console.log(`⚠️ 이전 인스턴스 발견 (PID: ${existingPid}), SIGTERM 전송...`);
           process.kill(existingPid, 'SIGTERM');
-          // 잠시 대기 후 확인
-          try {
-            const start = Date.now();
-            while (Date.now() - start < 3000) {
-              try { process.kill(existingPid, 0); } catch { break; }
-            }
-            // 아직 살아있으면 강제 종료
-            try { process.kill(existingPid, 'SIGKILL'); } catch {}
-          } catch {}
+          // gracefulShutdown이 exit(0)할 때까지 대기 (최대 5초)
+          const start = Date.now();
+          while (Date.now() - start < 5000) {
+            try { process.kill(existingPid, 0); } catch { break; }
+            // busy-wait 방지
+            const { execSync: es } = require('child_process');
+            try { es('sleep 0.5', { timeout: 1000 }); } catch {}
+          }
           console.log(`✅ 이전 인스턴스 (PID: ${existingPid}) 종료 완료`);
         } catch {
           // 프로세스가 이미 죽어있음 → stale lock
@@ -892,22 +891,34 @@ async function handleClaude(message, content) {
     }
   }
   // 2) 스마트 라우팅 (에이전트 원본 backend가 없는 경우에만)
-  // 원본이 zai인 에이전트는 항상 zai 유지, 원본이 없는 에이전트는 항상 Claude 유지
+  // 원본이 zai인 에이전트는 항상 zai 유지
   else if (channelModel && !_originalBackend) {
-    // backend 없는 에이전트만 스마트 라우팅 (Claude 내에서 모델 변경)
     const smartResult = smartRouteModel(prompt, channelModel);
     if (smartResult) {
       const tier = resolveModelTier(smartResult.model);
-      if (tier && !tier.backend) {
-        // Claude 모델 내에서만 변경 (zai로 전환 금지)
-        agent.model = tier.cliModel;
+      if (tier) {
+        if (tier.backend) {
+          // ZAI 백엔드 모델 적용 (agent-rules.json이 GLM-5 등을 지정한 경우)
+          agent.backend = tier.backend;
+          agent.model = tier.cliModel;
+          if (tier.zaiModel) agent.zaiModel = tier.zaiModel;
+        } else {
+          agent.model = tier.cliModel;
+        }
         _routingLabel = smartResult.label;
         console.log(`🧠 [스마트 라우팅] ch=${channelId} → ${smartResult.model} (${smartResult.label})`);
       }
     } else {
       const tier = resolveModelTier(channelModel);
-      if (tier && !tier.backend) {
-        agent.model = tier.cliModel;
+      if (tier) {
+        if (tier.backend) {
+          // ZAI 백엔드 모델 적용
+          agent.backend = tier.backend;
+          agent.model = tier.cliModel;
+          if (tier.zaiModel) agent.zaiModel = tier.zaiModel;
+        } else {
+          agent.model = tier.cliModel;
+        }
         console.log(`📐 [모델 라우팅] ch=${channelId} → ${channelModel} (채널 기본)`);
       }
     }
