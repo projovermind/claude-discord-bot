@@ -106,11 +106,22 @@ process.on('SIGTERM', gracefulShutdown);
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const TMP_DIR = '/tmp/claude-discord';
 
+let _configCache = null;
+let _configMtime = 0;
+
 function loadConfig() {
-  return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+  try {
+    const stat = fs.statSync(CONFIG_PATH);
+    if (_configCache && stat.mtimeMs === _configMtime) return _configCache;
+    _configCache = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+    _configMtime = stat.mtimeMs;
+    return _configCache;
+  } catch { return { agents: {}, channelBindings: {} }; }
 }
 function saveConfig(config) {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8');
+  _configCache = null;
+  _configMtime = 0;
 }
 
 // tmp 디렉토리 생성
@@ -219,6 +230,20 @@ function resolveModelTier(modelStr) {
 }
 
 /**
+ * 모델 문자열 → 사용자 친화적 라벨 변환.
+ * 예: 'claude-opus-4-6' → 'Claude Opus 4.6', 'glm-5' → 'GLM-5'
+ */
+function getModelDisplayLabel(modelStr) {
+  if (!modelStr) return null;
+  const m = modelStr.toLowerCase();
+  if (m.includes('opus')) return 'Claude Opus';
+  if (m.includes('sonnet')) return 'Claude Sonnet';
+  if (m.includes('haiku')) return 'Claude Haiku';
+  if (m.includes('glm')) return 'GLM-5';
+  return modelStr;
+}
+
+/**
  * exclusive_files 수정 감지.
  * model_tiers.opus.exclusive_files에 매칭되면 true.
  */
@@ -304,6 +329,10 @@ const client = new Client({
 
 const MAX_RESPONSE_LENGTH = 1900;
 const MAX_CONCURRENT_PER_CHANNEL = 1;  // 채널당 동시 작업 수 (1 = 순차 + 컨텍스트 합류)
+const MAX_QUEUE_SIZE = 5;           // 채널별 최대 대기열
+const MESSAGE_DEDUP_TTL = 60000;    // 중복 메시지 무시 (60초)
+const SESSION_TTL = 30 * 60 * 1000; // 세션 만료 (30분)
+const DISCORD_FILE_LIMIT = 10 * 1024 * 1024; // 10MB
 const activeRequests = new Set();      // 하위 호환용 (대시보드 등)
 const activeTaskCount = new Map();     // channelId → 현재 실행 중인 작업 수
 const botStartTime = Date.now();
@@ -359,7 +388,7 @@ async function processNextInQueue(channelId) {
 
 // ── 메시지 중복 처리 방지 (게이트웨이 재전달 대응) ──────
 const processedMessages = new Set();
-const MESSAGE_DEDUP_TTL = 60 * 1000; // 60초 내 동일 메시지 무시
+// MESSAGE_DEDUP_TTL은 상단 상수 영역에서 정의됨
 
 function markMessageProcessed(messageId) {
   processedMessages.add(messageId);
@@ -369,7 +398,7 @@ function markMessageProcessed(messageId) {
 // ── 대화 세션 관리 (채널별 컨텍스트 유지, 디스크 영구 저장) ──────
 const SESSION_FILE = path.join(__dirname, '.sessions.json');
 const channelSessions = new Map(); // channelId -> { sessionId, lastUsed, turnCount, summary }
-const SESSION_TTL = 30 * 60 * 1000; // 30분 — 긴 세션은 tool_use ID 오류 유발
+// SESSION_TTL은 상단 상수 영역에서 정의됨
 const SESSION_MAX_TURNS = 30; // 30턴 후 자동 요약 + 리셋 (컨텍스트 비대화 방지)
 
 // 시작 시 디스크에서 세션 복원
@@ -396,7 +425,9 @@ function saveSessions() {
     try {
       const obj = {};
       for (const [k, v] of channelSessions) obj[k] = v;
-      fs.writeFileSync(SESSION_FILE, JSON.stringify(obj, null, 2), 'utf-8');
+      const tmpPath = SESSION_FILE + '.tmp';
+      fs.writeFileSync(tmpPath, JSON.stringify(obj, null, 2));
+      fs.renameSync(tmpPath, SESSION_FILE);
     } catch (err) {
       console.warn('⚠️ 세션 저장 실패:', err.message);
     }
@@ -887,12 +918,18 @@ async function handleClaude(message, content) {
     }
   }
 
+  // 스마트 라우팅 라벨이 없으면 현재 모델 기반으로 자동 생성
+  if (!_routingLabel) {
+    const finalModel = agent.model || 'opus';
+    _routingLabel = getModelDisplayLabel(finalModel);
+  }
+
   // 채널 단위 동시 실행 제어 — 최대 동시 작업 수 초과 시 큐에 추가
   const currentTasks = getTaskCount(channelId);
   if (currentTasks >= MAX_CONCURRENT_PER_CHANNEL) {
     const queue = getQueue(channelId);
-    if (queue.length >= 5) {
-      await message.reply('⚠️ 대기열이 가득 찼습니다 (최대 5개). 현재 작업 완료 후 다시 시도해주세요.');
+    if (queue.length >= MAX_QUEUE_SIZE) {
+      await message.reply(`⚠️ 대기열이 가득 찼습니다 (최대 ${MAX_QUEUE_SIZE}개). 현재 작업 완료 후 다시 시도해주세요.`);
       return;
     }
     queue.push({ message, prompt });
@@ -942,9 +979,7 @@ async function handleClaude(message, content) {
       description += '\n```\n' + lines.join('\n') + '\n```';
     }
 
-    const footerText = _routingLabel
-      ? `⏱️ ${timeStr} 경과 | 🧠 ${_routingLabel}`
-      : `⏱️ ${timeStr} 경과`;
+    const footerText = `⏱️ ${timeStr} 경과 | 🧠 ${_routingLabel}`;
 
     return {
       color: 0x8B5CF6,
@@ -1232,6 +1267,9 @@ async function handleClaude(message, content) {
     totalProcessed++;
     const durationMs = Date.now() - startTime;
     taskHistory.push({ timestamp: Date.now(), durationMs });
+    // 48시간 이상 된 기록 제거
+    const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+    while (taskHistory.length > 0 && taskHistory[0].timestamp < cutoff) taskHistory.shift();
     updateDashboard();   // 대시보드 즉시 갱신
 
     // 큐에 대기 중인 메시지 처리
@@ -1835,75 +1873,9 @@ async function notifyAuthFailure() {
   }
 }
 
-// ── macOS 키체인에서 OAuth 토큰 가져오기 ──
+// ── OAuth 캐시 무효화 (CLI가 자체 refresh) ──
 let _oauthTokenCache = null;
 let _oauthTokenExpiry = 0;
-
-function getOAuthTokenFromKeychain() {
-  const now = Date.now();
-  if (_oauthTokenCache && now < _oauthTokenExpiry) return _oauthTokenCache;
-
-  // 1차: macOS 키체인에서 "Claude Code-credentials" 읽기
-  const keychainServices = [
-    'Claude Code-credentials',
-    'claude-code-credentials',
-    'claude-cli-oauth-token',
-  ];
-  for (const svc of keychainServices) {
-    try {
-      const raw = execSync(
-        `security find-generic-password -s "${svc}" -w 2>/dev/null`,
-        { timeout: 5000 }
-      ).toString().trim();
-      if (raw) {
-        let token = raw;
-        // JSON 형태인 경우 accessToken 추출
-        if (raw.startsWith('{')) {
-          try {
-            const json = JSON.parse(raw);
-            // {"claudeAiOauth":{"accessToken":"sk-ant-..."}} 형태
-            if (json.claudeAiOauth?.accessToken) {
-              token = json.claudeAiOauth.accessToken;
-            } else if (json.accessToken) {
-              token = json.accessToken;
-            } else if (json.oauth_token) {
-              token = json.oauth_token;
-            }
-          } catch {}
-        }
-        if (token && token.startsWith('sk-ant-')) {
-          _oauthTokenCache = token;
-          _oauthTokenExpiry = now + 5 * 60 * 1000;
-          console.log(`🔑 키체인에서 OAuth 토큰 로드 (${svc})`);
-          return token;
-        }
-      }
-    } catch {}
-  }
-
-  // 2차: Claude 설정 파일에서 읽기
-  try {
-    const homeDir = require('os').homedir();
-    const credPaths = [
-      `${homeDir}/.claude/credentials.json`,
-      `${homeDir}/.config/claude/credentials.json`,
-    ];
-    for (const p of credPaths) {
-      try {
-        const data = JSON.parse(fs.readFileSync(p, 'utf-8'));
-        const token = data.claudeAiOauth?.accessToken || data.oauth_token || data.accessToken || data.token;
-        if (token) {
-          _oauthTokenCache = token;
-          _oauthTokenExpiry = now + 5 * 60 * 1000;
-          console.log(`🔑 설정 파일에서 OAuth 토큰 로드: ${p}`);
-          return token;
-        }
-      } catch {}
-    }
-  } catch {}
-
-  return null;
-}
 
 function invalidateOAuthCache() {
   _oauthTokenCache = null;
@@ -1991,6 +1963,17 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    // 2시간 타임아웃
+    const PROCESS_TIMEOUT = 7200000; // 2시간
+    const killTimer = setTimeout(() => {
+      if (!settled) {
+        console.log('⏰ Claude CLI 타임아웃 (2시간) — 프로세스 강제 종료');
+        proc.kill('SIGKILL');
+        settled = true;
+        reject(new Error('Claude CLI 타임아웃 (2시간 초과)'));
+      }
+    }, PROCESS_TIMEOUT);
+
     // 외부에서 프로세스 참조 가능 (중단용)
     if (onProcSpawn) onProcSpawn(proc);
 
@@ -2049,6 +2032,7 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
       });
 
       proc.on('close', (code) => {
+        clearTimeout(killTimer);
         if (settled) return;
         settled = true;
 
@@ -2107,6 +2091,7 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
       proc.stdout.on('data', (d) => chunks.push(d.toString()));
 
       proc.on('close', (code) => {
+        clearTimeout(killTimer);
         if (settled) return;
         settled = true;
 
@@ -2155,6 +2140,7 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
     }
 
     proc.on('error', (err) => {
+      clearTimeout(killTimer);
       if (settled) return;
       settled = true;
       reject(new Error(`Claude 실행 실패: ${err.message}`));
@@ -2171,12 +2157,10 @@ async function runClaude(prompt, systemPrompt, agent = {}, sessionId = null, onT
       throw new Error(`Backend "${agent.backend}" not available. Set ${agent.backend.toUpperCase()}_API_KEY in .env`);
     }
     console.log(`🌐 ${agent.backend} 백엔드 사용: model=${agent.model || 'default'}`);
-    // Z.ai는 도구 ID 패턴 호환 문제로 도구 사용 비활성화
-    const zaiAgent = agent.backend === 'zai' ? { ...agent, allowedTools: [] } : agent;
     const zaiOpts = {
       message: prompt,
       systemPrompt,
-      agent: zaiAgent,
+      agent,
       backend: agent.backend,
       workingDir: agent.workingDir,
       onToolCall: (name, args) => {
@@ -2420,7 +2404,6 @@ async function sendResponseWithFiles(message, response) {
 
   // 파일 전송
   if (filePaths.length > 0) {
-    const DISCORD_FILE_LIMIT = 10 * 1024 * 1024; // 10MB
     const validFiles = filePaths.filter(p => {
       if (!fs.existsSync(p)) { console.warn(`파일 없음: ${p}`); return false; }
       return true;
@@ -2703,17 +2686,7 @@ async function setupDashboard() {
       dashboards.set(projId, { channel, message, lastState: '', project: proj });
     }
 
-    // 대시보드 채널에 사용자 메시지 오면 자동 삭제 (중복 등록 방지)
-    if (!setupDashboard._listenerRegistered) {
-      setupDashboard._listenerRegistered = true;
-      client.on('messageCreate', async (msg) => {
-        if (msg.author.bot) return;
-        const isDashChannel = [...dashboards.values()].some(d => d.channel.id === msg.channelId);
-        if (isDashChannel) {
-          try { await msg.delete(); } catch {}
-        }
-      });
-    }
+    // 대시보드 채널 메시지 삭제는 메인 messageCreate 핸들러에서 처리
 
     // 5초마다 전체 업데이트 (중복 등록 방지)
     if (!setupDashboard._intervalRegistered) {
@@ -3132,6 +3105,17 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
   const targetChannel = targetChannelId ? guild.channels.cache.get(targetChannelId) : null;
   const workChannel = targetChannel || originalMessage.channel;
 
+  // 위임 대상 채널 동시 작업 수 확인
+  if (targetChannelId) {
+    const currentTasks = getTaskCount(targetChannelId);
+    if (currentTasks >= MAX_CONCURRENT_PER_CHANNEL) {
+      console.log(`⚠️ 위임 대상 채널 ${targetChannelId} 작업 중 — 큐에 추가`);
+      const queue = getQueue(targetChannelId);
+      queue.push({ message: originalMessage, prompt: task });
+      return;
+    }
+  }
+
   // 대시보드에 위임 에이전트 표시
   const delegateKey = `delegate_${targetAgentId}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   const delegateChannelId = targetChannelId || delegateKey;
@@ -3226,7 +3210,18 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
 
     // 위임받은 에이전트의 기존 세션 이어가기 (컨텍스트 유지)
     const delegateSessionId = targetChannelId ? getSessionId(targetChannelId) : null;
-    const result = await _runClaudeOnce(task, systemPrompt, targetAgent, delegateSessionId, onToolUse, onProcSpawn);
+    let result;
+    try {
+      result = await _runClaudeOnce(task, systemPrompt, targetAgent, delegateSessionId, onToolUse, onProcSpawn);
+    } catch (err) {
+      if (delegateSessionId && (err.isSessionError || err.message?.includes('signature') || err.message?.includes('400'))) {
+        console.log(`⚠️ 위임 세션 손상 → 새 세션으로 재시도`);
+        if (targetChannelId) clearSession(targetChannelId);
+        result = await _runClaudeOnce(task, systemPrompt, targetAgent, null, onToolUse, onProcSpawn);
+      } else {
+        throw err;
+      }
+    }
 
     clearInterval(typingInterval);
 
@@ -3294,6 +3289,9 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     totalProcessed++;
     const durationMs = Date.now() - startTime;
     taskHistory.push({ timestamp: Date.now(), durationMs });
+    // 48시간 이상 된 기록 제거
+    const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+    while (taskHistory.length > 0 && taskHistory[0].timestamp < cutoff) taskHistory.shift();
     updateDashboard();
   }
 }
