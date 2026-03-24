@@ -845,28 +845,38 @@ async function handleClaude(message, content) {
       // 스마트 라우팅 결정 → 해당 모델 적용
       const tier = resolveModelTier(smartResult.model);
       if (tier) {
-        agent.model = tier.cliModel;
-        if (tier.backend === 'zai') {
-          agent.backend = 'zai';
-          agent.zaiModel = tier.zaiModel;
-        } else if (agent.backend === 'zai') {
-          delete agent.backend;
+        // Z.ai 백엔드는 키가 있을 때만 사용
+        if (tier.backend === 'zai' && !isBackendAvailable('zai')) {
+          console.log(`⚠️ [라우팅] Z.ai 키 없음 → 기본 모델 유지`);
+        } else {
+          agent.model = tier.cliModel;
+          if (tier.backend === 'zai') {
+            agent.backend = 'zai';
+            agent.zaiModel = tier.zaiModel;
+          } else if (agent.backend === 'zai') {
+            delete agent.backend;
+          }
+          _routingLabel = smartResult.label;
+          console.log(`🧠 [스마트 라우팅] ch=${channelId} → ${smartResult.model} (${smartResult.reason}: ${smartResult.label})`);
         }
-        _routingLabel = smartResult.label;
-        console.log(`🧠 [스마트 라우팅] ch=${channelId} → ${smartResult.model} (${smartResult.reason}: ${smartResult.label})`);
       }
     } else {
       // 판단 불가 → 채널 기본 모델
       const tier = resolveModelTier(channelModel);
       if (tier) {
-        agent.model = tier.cliModel;
-        if (tier.backend === 'zai') {
-          agent.backend = 'zai';
-          agent.zaiModel = tier.zaiModel;
-        } else if (agent.backend === 'zai') {
-          delete agent.backend;
+        // Z.ai 백엔드는 키가 있을 때만 사용
+        if (tier.backend === 'zai' && !isBackendAvailable('zai')) {
+          console.log(`⚠️ [라우팅] Z.ai 키 없음 → 기본 모델 유지`);
+        } else {
+          agent.model = tier.cliModel;
+          if (tier.backend === 'zai') {
+            agent.backend = 'zai';
+            agent.zaiModel = tier.zaiModel;
+          } else if (agent.backend === 'zai') {
+            delete agent.backend;
+          }
+          console.log(`📐 [모델 라우팅] ch=${channelId} → ${channelModel} (채널 기본)`);
         }
-        console.log(`📐 [모델 라우팅] ch=${channelId} → ${channelModel} (채널 기본)`);
       }
     }
   }
@@ -1705,7 +1715,7 @@ async function handleHookCommand(message, content) {
 // ── OAuth 인증 상태 관리 ──
 let _authFailed = false;           // 현재 인증 실패 상태
 let _authFailNotified = false;     // 알림 전송 여부 (중복 알림 방지)
-const AUTH_ALERT_CHANNEL = null;
+const AUTH_ALERT_CHANNEL = null; // 릴리즈용 (알림 비활성) // 인증 알림 채널 (하이브마인드)
 
 function isAuthError(output, stderrOutput) {
   const combined = (output + ' ' + stderrOutput).toLowerCase();
@@ -2864,7 +2874,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '2.9.22';
+const BOT_VERSION = '2.9.23';
 
 async function checkForUpdates() {
   const config = loadConfig();
