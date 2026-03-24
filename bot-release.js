@@ -237,12 +237,10 @@ function getModelDisplayLabel(modelStr) {
   if (!modelStr) return null;
   let m = modelStr.toLowerCase();
 
-  // 짧은 티어명 → full ID 조회 (agent-rules.json 우선, 없으면 기본값)
-  const DEFAULT_TIERS = { opus: 'claude-opus-4-6', sonnet: 'claude-sonnet-4-6', haiku: 'claude-haiku-4-5' };
+  // 짧은 티어명 → full ID 조회 (agent-rules.json)
   const rules = loadAgentRules();
   const tierDef = (rules.model_tiers || {})[m];
   if (tierDef?.id) m = tierDef.id.toLowerCase();
-  else if (DEFAULT_TIERS[m]) m = DEFAULT_TIERS[m];
 
   // 버전 추출: 'claude-opus-4-6' → '4.6', 'claude-haiku-4-5-20251001' → '4.5'
   const verMatch = m.match(/(\d+)-(\d+)(?:-\d{8,})?$/);
@@ -1106,6 +1104,12 @@ async function handleClaude(message, content) {
     if (result.sessionId) {
       setSessionId(channelId, result.sessionId);
       console.log(`💾 세션 저장: ch=${channelId} session=${result.sessionId.slice(0, 8)}...`);
+    }
+
+    // 응답에서 실제 모델 ID가 감지되면 라벨 업데이트
+    if (result.model) {
+      const detectedLabel = getModelDisplayLabel(result.model);
+      if (detectedLabel) _routingLabel = detectedLabel;
     }
 
     const rawResponse = result.text;
@@ -2005,6 +2009,7 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
       let resultText = null;
       let resultSessionId = null;
       let resultIsError = false;
+      let resultModel = null;     // 실제 사용된 모델 ID (동적 감지)
       const assistantTexts = [];  // assistant 메시지 텍스트 축적
 
       proc.stdout.on('data', (d) => {
@@ -2023,6 +2028,8 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
             } else if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
               onToolUse(event.content_block.name, event.content_block.input || {});
             } else if (event.type === 'assistant') {
+              // 모델 ID 캡처 (예: 'claude-opus-4-6-20250514')
+              if (!resultModel) resultModel = event.message?.model || event.model || null;
               // assistant 메시지 내 텍스트 + tool_use 블록 수집
               const content = event.message?.content || event.content || [];
               if (Array.isArray(content)) {
@@ -2042,6 +2049,7 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
               resultText = event.result ?? null;
               resultSessionId = event.session_id || null;
               resultIsError = event.is_error || false;
+              if (!resultModel) resultModel = event.model || null;
             }
           } catch {
             // JSON 파싱 실패 — 무시
@@ -2099,7 +2107,7 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
           return;
         }
 
-        resolve({ text: finalText, sessionId: resultSessionId, isError: resultIsError });
+        resolve({ text: finalText, sessionId: resultSessionId, isError: resultIsError, model: resultModel });
       });
 
     } else {
@@ -2137,6 +2145,7 @@ function _runClaudeOnce(prompt, systemPrompt, agent = {}, sessionId = null, onTo
               text: resultText,
               sessionId: json.session_id || null,
               isError: json.is_error || false,
+              model: json.model || null,
             });
           } catch {
             console.warn('⚠️ JSON 파싱 실패, 원시 텍스트 사용');
@@ -2943,7 +2952,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '3.0.3';
+const BOT_VERSION = '3.0.4';
 
 async function checkForUpdates() {
   const config = loadConfig();
@@ -3156,7 +3165,7 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
   };
 
   // 위임 에이전트 모델 라벨
-  const _delegateModelLabel = getModelDisplayLabel(targetAgent.model || 'opus') || 'Claude Opus';
+  let _delegateModelLabel = getModelDisplayLabel(targetAgent.model || 'opus') || 'Claude Opus';
 
   // 위임받은 채널에 진행 임베드 표시
   let progressMsg = null;
@@ -3245,6 +3254,12 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     }
 
     clearInterval(typingInterval);
+
+    // 응답에서 실제 모델 감지 시 라벨 업데이트
+    if (result.model) {
+      const detected = getModelDisplayLabel(result.model);
+      if (detected) _delegateModelLabel = detected;
+    }
 
     // 완료 임베드
     const elapsed = Math.round((Date.now() - startTime) / 1000);
