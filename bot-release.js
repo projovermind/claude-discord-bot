@@ -654,6 +654,12 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  // ── !zai 명령 — Z.ai 에이전트 자동 생성 ──
+  if (content.startsWith('!zai')) {
+    await handleZaiSetup(message, content);
+    return;
+  }
+
   // ── !hook 명령 ───────────────────────────
   if (content.startsWith('!hook')) {
     await handleHookCommand(message, content);
@@ -1614,6 +1620,90 @@ async function handleDashboardButton(interaction) {
     });
   }
   return true;
+}
+
+// ─────────────────────────────────────────
+//  !zai 명령 — Z.ai 에이전트 원클릭 생성
+// ─────────────────────────────────────────
+async function handleZaiSetup(message, content) {
+  const apiKey = content.replace('!zai', '').trim();
+  if (!apiKey) {
+    await message.reply('사용법: `!zai <Z.ai API 키>`\n\nZ.ai 에이전트 + 채널이 자동 생성됩니다.\nAPI 키는 https://z.ai/manage-apikey 에서 발급받으세요.');
+    return;
+  }
+
+  const config = loadConfig();
+  const guild = message.guild;
+  if (!guild) return;
+
+  await message.reply('🧿 Z.ai 설정 시작...');
+
+  try {
+    // 1. .env에 ZAI_API_KEY 저장
+    const envPath = path.join(__dirname, '.env');
+    let envContent = '';
+    try { envContent = fs.readFileSync(envPath, 'utf-8'); } catch {}
+    if (envContent.includes('ZAI_API_KEY=')) {
+      envContent = envContent.replace(/ZAI_API_KEY=.*/g, `ZAI_API_KEY=${apiKey}`);
+    } else {
+      envContent += `\nZAI_API_KEY=${apiKey}`;
+    }
+    fs.writeFileSync(envPath, envContent.trim() + '\n');
+    process.env.ZAI_API_KEY = apiKey;
+
+    // 2. 에이전트 생성 (없으면)
+    if (!config.agents) config.agents = {};
+    if (!config.agents.zai_hivemind) {
+      config.agents.zai_hivemind = {
+        name: 'Z.ai 하이브마인드',
+        avatar: '🧿',
+        systemPrompt: '당신은 Z.ai GLM-5 기반 AI 어시스턴트입니다. 한국어로 답변하세요. 요청에 대해 확인 질문 없이 바로 실행하고, 결과를 구체적으로 알려주세요.',
+        workingDir: process.cwd(),
+        backend: 'zai',
+        zaiModel: 'glm-5',
+        model: 'opus',
+      };
+    }
+
+    // 3. 채널 생성 (없으면)
+    let zaiChannel = guild.channels.cache.find(
+      ch => ch.name.includes('zai') && ch.name.includes('하이브마인드')
+    );
+    if (!zaiChannel) {
+      // 기존 카테고리 찾기 (하이브마인드 있는 카테고리)
+      const hivemindCh = guild.channels.cache.find(ch => ch.name.includes('하이브마인드'));
+      const parentId = hivemindCh?.parentId || null;
+
+      zaiChannel = await guild.channels.create({
+        name: '🧿zai-하이브마인드',
+        type: 0, // GuildText
+        topic: 'Z.ai GLM-5 에이전트 — 자동 생성됨',
+        parent: parentId,
+      });
+    }
+
+    // 4. 채널 바인딩
+    if (!config.channelBindings) config.channelBindings = {};
+    config.channelBindings[zaiChannel.id] = 'zai_hivemind';
+
+    // 5. config 저장
+    saveConfig(config);
+
+    // 6. 원본 메시지 삭제 (API 키 노출 방지)
+    try { await message.delete(); } catch {}
+
+    await message.channel.send(
+      `✅ Z.ai 설정 완료!\n\n` +
+      `🧿 **에이전트**: Z.ai 하이브마인드 (GLM-5)\n` +
+      `💬 **채널**: <#${zaiChannel.id}>\n\n` +
+      `해당 채널에서 바로 대화하면 GLM-5가 응답합니다.`
+    );
+
+    console.log(`🧿 Z.ai 설정 완료: agent=zai_hivemind channel=${zaiChannel.id}`);
+  } catch (err) {
+    await message.reply(`❌ Z.ai 설정 실패: ${err.message}`);
+    console.error('Z.ai 설정 오류:', err);
+  }
 }
 
 // ─────────────────────────────────────────
