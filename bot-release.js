@@ -541,6 +541,9 @@ const SELF_VERIFICATION_PROMPT = `## 자기 검증 규칙 (필수 준수)
 
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'Bash']);
 
+// 🔒 권한 요청 대기열 (버튼 클릭 시 참조)
+const pendingPermissions = new Map();
+
 function agentHasWriteTools(agent) {
   return (agent.allowedTools || []).some(t => WRITE_TOOLS.has(t));
 }
@@ -584,6 +587,14 @@ function buildSystemPrompt(agent, agentId, agentConfig, sessionData) {
   // 최적화 #5: 쓰기 권한 있는 에이전트만 검증 프롬프트 주입
   if (agentHasWriteTools(agent)) {
     prompt += '\n\n' + SELF_VERIFICATION_PROMPT;
+  } else {
+    // 쓰기 도구 없는 에이전트 → 권한 요청 방법 안내
+    prompt += `\n\n## 권한 요청 시스템
+현재 파일 수정 도구(Write, Edit, Bash)가 없습니다. 코드 수정이 필요한 작업을 요청받으면:
+1. 직접 수정하지 말고, 아래 JSON으로 권한을 요청하세요 (코드블록 금지):
+{"message": "사용자 메시지", "requestPermission": {"tools": ["Write", "Edit", "Bash"], "reason": "수정 사유"}}
+2. 관리자가 버튼으로 승인하면 다음 메시지부터 수정 도구를 사용할 수 있습니다.
+3. 읽기 전용 작업(분석, 검색, 설명)은 권한 없이 바로 수행하세요.`;
   }
 
   // 최적화 #1: 코어 액션은 항상, 위임은 조건부
@@ -651,6 +662,50 @@ client.once('clientReady', () => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
   try {
+    // 🔒 권한 요청 버튼 처리
+    const cid = interaction.customId;
+    if (cid.startsWith('perm_allow_') || cid.startsWith('perm_deny_')) {
+      const isAllow = cid.startsWith('perm_allow_');
+      const permId = cid.replace(/^perm_(allow|deny)_/, '');
+      const perm = pendingPermissions.get(permId);
+
+      if (!perm) {
+        // 봇 재시작 후 → 만료 처리
+        await interaction.update({
+          content: '⏰ 이 권한 요청은 만료되었습니다. 에이전트에게 다시 요청해주세요.',
+          components: [],
+        });
+        return;
+      }
+
+      pendingPermissions.delete(permId);
+
+      if (isAllow) {
+        // config.json에 도구 추가
+        const config = loadConfig();
+        const agent = config.agents[perm.agentId];
+        if (agent) {
+          const existing = new Set(agent.allowedTools || []);
+          for (const t of perm.tools) existing.add(t);
+          agent.allowedTools = [...existing];
+          saveConfig(config);
+          console.log(`✅ 권한 승인: ${perm.agentId} += ${perm.tools.join(', ')} (by ${interaction.user.tag})`);
+        }
+
+        await interaction.update({
+          content: `✅ **${perm.agentId}** 에이전트에 **${perm.tools.join('·')}** 권한이 추가되었습니다. (승인: ${interaction.user})`,
+          components: [],
+        });
+      } else {
+        console.log(`❌ 권한 거부: ${perm.agentId} (by ${interaction.user.tag})`);
+        await interaction.update({
+          content: `❌ **${perm.agentId}** 에이전트의 권한 요청이 거부되었습니다. (거부: ${interaction.user})`,
+          components: [],
+        });
+      }
+      return;
+    }
+
     const handled = await handleDashboardButton(interaction);
     if (!handled && !interaction.replied) {
       await interaction.reply({ content: '알 수 없는 버튼입니다.', ephemeral: true });
@@ -1215,6 +1270,49 @@ async function handleClaude(message, content) {
 
     if (result2) {
       const { parsed: pj, before, after } = result2;
+
+      // 🔒 권한 요청 버튼 처리
+      if (pj.requestPermission) {
+        const reqTools = pj.requestPermission.tools || ['Write', 'Edit', 'Bash'];
+        const reason = pj.requestPermission.reason || '파일 수정이 필요합니다';
+        const permMsg = pj.message || before || `${agentLabel}이(가) 권한을 요청합니다.`;
+
+        // 버튼 생성
+        const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+        const permId = `${agentId}_${Date.now()}`;
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`perm_allow_${permId}`)
+            .setLabel('허용')
+            .setStyle(ButtonStyle.Success)
+            .setEmoji('✅'),
+          new ButtonBuilder()
+            .setCustomId(`perm_deny_${permId}`)
+            .setLabel('거부')
+            .setStyle(ButtonStyle.Danger)
+            .setEmoji('❌'),
+        );
+
+        // 권한 요청 정보 저장 (버튼 클릭 시 참조)
+        pendingPermissions.set(permId, {
+          agentId,
+          tools: reqTools,
+          channelId: message.channelId,
+          requestedAt: Date.now(),
+        });
+
+        const toolList = reqTools.join('·');
+        await message.reply({
+          content: `🔒 **${agentLabel}**이(가) 파일 수정 권한을 요청합니다.\n허용하면 **${toolList}** 도구가 이 에이전트에 영구 추가됩니다.\n\n📋 **사유:** ${reason}`,
+          components: [row],
+        });
+
+        // 메시지도 전송
+        if (permMsg && permMsg !== `${agentLabel}이(가) 권한을 요청합니다.`) {
+          await sendResponseWithFiles(message, permMsg);
+        }
+        return; // 여기서 종료 — 응답 완료, finally에서 정리
+      }
 
       // 위임 처리 (단일: delegate, 복수: delegates)
       const delegations = pj.delegates
@@ -2328,7 +2426,7 @@ function tryParseJSON(raw) {
   try {
     const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const parsed = JSON.parse(cleaned);
-    if (parsed.message || parsed.actions || parsed.delegate) return { parsed, before: '', after: '' };
+    if (parsed.message || parsed.actions || parsed.delegate || parsed.requestPermission) return { parsed, before: '', after: '' };
     return null;
   } catch {}
 
@@ -2363,7 +2461,7 @@ function tryParseJSON(raw) {
     try {
       const jsonStr = raw.slice(jsonStart, jsonEnd);
       const parsed = JSON.parse(jsonStr);
-      if (parsed.message || parsed.actions || parsed.delegate || parsed.delegates) {
+      if (parsed.message || parsed.actions || parsed.delegate || parsed.delegates || parsed.requestPermission) {
         const before = raw.slice(0, jsonStart).trim();
         const after = raw.slice(jsonEnd).trim();
         return { parsed, before, after };
@@ -2985,7 +3083,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '3.0.10';
+const BOT_VERSION = '3.0.13';
 
 async function checkForUpdates() {
   const config = loadConfig();
