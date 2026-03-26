@@ -578,7 +578,14 @@ const DISCORD_DELEGATION_PROMPT = `## 에이전트 위임
 작업이 다른 에이전트 전문 영역이면 JSON으로 위임:
 단일: {"message": "응답", "delegate": {"agent": "ID", "task": "설명"}}
 복수: {"message": "응답", "delegates": [{"agent": "ID1", "task": "작업1"}, {"agent": "ID2", "task": "작업2"}]}
-결과 반환: "returnResult": true 추가.`;
+결과 반환: "returnResult": true 추가.
+
+⚠️ 위임 JSON 필수 규칙:
+- task는 200자 이내 한국어 요약만 작성 (파일 경로 + 수정 방향)
+- 절대 금지: 코드블록, diff, HTML/JSX, 따옴표 포함 코드를 task에 넣지 말 것
+- 대상 에이전트가 직접 파일을 읽고 구현함 — 코드를 전달할 필요 없음
+- 나쁜 예: "task": "\`\`\`tsx\\n<div style={{...}}>\\n\`\`\`로 변경"
+- 좋은 예: "task": "DrawingSettingsPopup.tsx 96줄 컬러그리드 gap을 '2px 0'으로 변경하고, 771줄 date width를 155로, 777줄 time width를 105로 확대"`;
 
 // ── 시스템 프롬프트 빌더 (토큰 최적화) ──
 function buildSystemPrompt(agent, agentId, agentConfig, sessionData) {
@@ -1058,14 +1065,17 @@ async function handleClaude(message, content) {
   // 진행 메시지 생성
   let progressMsg = null;
   try {
-    progressMsg = await message.channel.send({ embeds: [makeProgressEmbed()] });
+    progressMsg = await Promise.race([
+      message.channel.send({ embeds: [makeProgressEmbed()] }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('send timeout')), 8000)),
+    ]);
   } catch {}
 
   // 타이핑 표시 유지
   let typingInterval = setInterval(() => {
     message.channel.sendTyping().catch(() => {});
   }, 5000);
-  await message.channel.sendTyping();
+  message.channel.sendTyping().catch(() => {});  // fire-and-forget (레이트 리밋 시 taskCount 고착 방지)
 
   // 진행 메시지 업데이트 (3초마다)
   const progressInterval = setInterval(async () => {
@@ -2426,7 +2436,7 @@ function tryParseJSON(raw) {
   try {
     const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const parsed = JSON.parse(cleaned);
-    if (parsed.message || parsed.actions || parsed.delegate || parsed.requestPermission) return { parsed, before: '', after: '' };
+    if (parsed.message || parsed.actions || parsed.delegate || parsed.delegates || parsed.requestPermission) return { parsed, before: '', after: '' };
     return null;
   } catch {}
 
@@ -2466,9 +2476,26 @@ function tryParseJSON(raw) {
         const after = raw.slice(jsonEnd).trim();
         return { parsed, before, after };
       }
-    } catch {}
+    } catch {
+      try {
+        const jsonStr = raw.slice(jsonStart, jsonEnd);
+        const repaired = jsonStr.replace(
+          /"(task|message)"\s*:\s*"((?:[^"\\]|\\.)*)```[\s\S]*?```((?:[^"\\]|\\.)*)"/g,
+          (_, key, before, after) => `"${key}": "${before}[코드 생략]${after}"`
+        );
+        if (repaired !== jsonStr) {
+          const parsed = JSON.parse(repaired);
+          if (parsed.message || parsed.actions || parsed.delegate || parsed.delegates || parsed.requestPermission) {
+            console.log('🔧 [tryParseJSON] 코드블록 제거 후 JSON 복구 성공');
+            const before2 = raw.slice(0, jsonStart).trim();
+            const after2 = raw.slice(jsonEnd).trim();
+            return { parsed, before: before2, after: after2 };
+          }
+        }
+      } catch {}
+    }
 
-    searchFrom = jsonStart + 1;  // 이 위치에서 실패하면 다음 { 찾기
+    searchFrom = jsonStart + 1;
   }
 
   return null;
@@ -3499,51 +3526,77 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
   }
 }
 
-// JSON 응답에서 delegate 패턴 감지 및 처리
+// JSON 응답에서 delegate/delegates 패턴 감지 및 처리
 async function handleDelegation(rawResponse, message) {
-  // delegate 패턴 찾기: {"delegate": {"agent": "...", "task": "..."}}
+  let parsed = null;
+  let before = '', after = '';
+
   try {
-    const parsed = JSON.parse(rawResponse);
-    if (parsed.delegate) {
-      const { agent: targetId, task } = parsed.delegate;
-      if (targetId && task) {
-        const sourceAgent = getAgentForChannel(message.channel.id);
-        await delegateToAgent(sourceAgent?.name || '메인', targetId, task, message);
+    parsed = JSON.parse(rawResponse);
+  } catch {
+    const extracted = tryParseJSON(rawResponse);
+    if (extracted && (extracted.parsed.delegate || extracted.parsed.delegates)) {
+      parsed = extracted.parsed;
+      before = extracted.before;
+      after = extracted.after;
+    }
+  }
+
+  if (!parsed) return false;
+
+  // ── 단일 위임 (delegate) ──
+  if (parsed.delegate) {
+    const { agent: targetId, task, returnResult } = parsed.delegate;
+    if (targetId && task) {
+      const msg = parsed.message || before;
+      if (msg) await sendResponseWithFiles(message, msg);
+
+      const sourceAgent = getAgentForChannel(message.channel.id);
+      const delegatePromise = delegateToAgent(sourceAgent?.name || '메인', targetId, task, message);
+
+      if (returnResult) {
+        delegatePromise.then(result => {
+          if (result?.text) {
+            const agentName = loadConfig().agents?.[targetId]?.name || targetId;
+            const summary = result.text.length > 1500 ? result.text.slice(0, 1500) + '...(생략)' : result.text;
+            message.channel.send(`📋 **${agentName}** 작업 결과:\n${summary}`).catch(() => {});
+          }
+        }).catch(() => {});
       }
-      // delegate 외에 message가 있으면 그것도 전송
-      if (parsed.message) {
-        await sendResponseWithFiles(message, parsed.message);
-      }
+
+      if (after) await sendResponseWithFiles(message, after);
       return true;
     }
-  } catch {
-    // JSON이 아니면 tryParseJSON으로 텍스트 내 JSON 추출
-    const extracted = tryParseJSON(rawResponse);
-    if (extracted && extracted.parsed.delegate) {
-      const { agent: targetId, task, returnResult } = extracted.parsed.delegate;
-      if (targetId && task) {
-        // message가 있으면 먼저 전송
-        const msg = extracted.parsed.message || extracted.before;
-        if (msg) await sendResponseWithFiles(message, msg);
+  }
 
-        const sourceAgent = getAgentForChannel(message.channel.id);
-        const delegatePromise = delegateToAgent(sourceAgent?.name || '메인', targetId, task, message);
+  // ── 복수 위임 (delegates) ──
+  if (parsed.delegates && Array.isArray(parsed.delegates) && parsed.delegates.length > 0) {
+    const delegations = parsed.delegates;
+    const targetNames = delegations.map(d => d.agent).join(', ');
+    const delegateMsg = parsed.message || before || `${targetNames} 에이전트에게 위임합니다.`;
+    console.log(`🤝 [handleDelegation] 복수 위임 (${delegations.length}건): ${delegateMsg.slice(0, 80)}`);
 
-        if (returnResult) {
-          delegatePromise.then(result => {
-            if (result?.text) {
-              const agentName = loadConfig().agents?.[targetId]?.name || targetId;
+    try { await message.reply(delegateMsg); } catch {}
+
+    const sourceAgent = getAgentForChannel(message.channel.id);
+    for (const d of delegations) {
+      if (d.agent && d.task) {
+        delegateToAgent(sourceAgent?.name || '메인', d.agent, d.task, message)
+          .then(result => {
+            if (d.returnResult && result?.text) {
+              const agentName = loadConfig().agents?.[d.agent]?.name || d.agent;
               const summary = result.text.length > 1500 ? result.text.slice(0, 1500) + '...(생략)' : result.text;
               message.channel.send(`📋 **${agentName}** 작업 결과:\n${summary}`).catch(() => {});
             }
-          }).catch(() => {});
-        }
-
-        if (extracted.after) await sendResponseWithFiles(message, extracted.after);
-        return true;
+          })
+          .catch(() => {});
       }
     }
+
+    if (after) await sendResponseWithFiles(message, after);
+    return true;
   }
+
   return false;
 }
 
