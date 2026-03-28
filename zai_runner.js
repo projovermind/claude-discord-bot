@@ -19,6 +19,18 @@ const BACKENDS = {
       opus: 'glm-5',
     },
   },
+  // glm5: ZhipuAI 직접 API (haiku 금지 대체 경로)
+  glm5: {
+    baseURL: 'https://open.bigmodel.cn/api/paas/v4/',
+    envKey: 'ZAI_API_KEY',
+    models: {
+      default: 'glm-5',
+      'glm-5': 'glm-5',
+      haiku: 'glm-5',
+      sonnet: 'glm-5',
+      opus: 'glm-5',
+    },
+  },
   deepseek: {
     baseURL: 'https://api.deepseek.com/v1/',
     envKey: 'DEEPSEEK_API_KEY',

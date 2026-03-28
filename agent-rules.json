@@ -26,9 +26,12 @@
       "id": "claude-sonnet-4-6",
       "cli_model": "sonnet"
     },
-    "haiku": {
-      "id": "claude-haiku-4-5-20251001",
-      "cli_model": "haiku"
+    "glm-5": {
+      "id": "glm-5",
+      "cli_model": "glm-5",
+      "backend": "zai",
+      "zai_model": "glm-5",
+      "note": "haiku 금지 — GLM-5로 대체"
     },
     "glm5": {
       "id": "zhipu/glm-5",
@@ -39,13 +42,19 @@
   },
   "smart_routing": {
     "enabled": true,
-    "cross_module_keywords": ["리팩토링", "전체", "파이프라인 구조", "아키텍처", "크로스", "통합", "마이그레이션", "전면", "구조 변경", "refactor", "architecture"],
-    "single_module_keywords": ["버그", "수정", "추가", "오류", "에러", "fix", "bug", "추가해", "변경해", "고쳐", "넣어", "빼"],
+    "cross_module_keywords": [
+      "리팩토링", "전체", "파이프라인 구조", "아키텍처", "크로스",
+      "통합", "마이그레이션", "전면", "구조 변경", "refactor", "architecture"
+    ],
+    "single_module_keywords": [
+      "버그", "수정", "추가", "오류", "에러", "fix", "bug",
+      "추가해", "변경해", "고쳐", "넣어", "빼"
+    ],
     "escalation_model": "claude-opus-4-6",
     "economy_model": "zhipu/glm-5"
   },
   "agents": {
-    "general":              { "channel_id": "1475753369078468630", "model": "zhipu/glm-5" },
+    "general":              { "channel_id": "1475753369078468630", "model": "claude-opus-4-6" },
     "hivemind":             { "channel_id": "1475759262239293481", "model": "claude-opus-4-6" },
     "router":               { "channel_id": "1478907596579540992", "model": "zhipu/glm-5" },
     "pipeline":             { "channel_id": "1478907598014119967", "model": "claude-opus-4-6" },
@@ -54,7 +63,7 @@
     "data":                 { "channel_id": "1478907606012530808", "model": "zhipu/glm-5" },
     "report":               { "channel_id": "1478907610400030928", "model": "zhipu/glm-5" },
     "addon":                { "channel_id": "1478907614107533343", "model": "zhipu/glm-5" },
-    "btc_scalper":          { "channel_id": "1482783843692974231", "model": "zhipu/glm-5" },
+    "btc_scalper":          { "channel_id": "1482783843692974231", "model": "claude-opus-4-6" },
     "algorithm":            { "channel_id": "1483723024547971132", "model": "zhipu/glm-5" },
     "cc_router":            { "channel_id": "1479000426832592997", "model": "zhipu/glm-5" },
     "cc_topics":            { "channel_id": "1479009055203917914", "model": "zhipu/glm-5" },
@@ -67,16 +76,25 @@
     "cc_production":        { "channel_id": "1483115709138735184", "model": "zhipu/glm-5" },
     "installer":            { "channel_id": "1484380705109704725", "model": "claude-opus-4-6" },
     "underdog_planner":     { "channel_id": "1484449851579175027", "model": "zhipu/glm-5" },
-    "underdog_match_engine":{ "channel_id": "1484524185538658495", "model": "zhipu/glm-5" },
-    "underdog_stats":       { "channel_id": "1484524186780045312", "model": "zhipu/glm-5" },
+    "underdog_match_engine":{ "channel_id": "1484524185538658495", "model": "claude-opus-4-6" },
+    "underdog_stats":       { "channel_id": "1484524186780045312", "model": "claude-opus-4-6" },
     "underdog_traits":      { "channel_id": "1484524187635810346", "model": "zhipu/glm-5" },
     "underdog_roster":      { "channel_id": "1484524189384839308", "model": "zhipu/glm-5" },
     "underdog_economy":     { "channel_id": "1484524190483873833", "model": "zhipu/glm-5" },
     "underdog_frontend":    { "channel_id": "1484524192031314051", "model": "zhipu/glm-5" },
     "underdog_sprites":     { "channel_id": "1484910165307424848", "model": "zhipu/glm-5" },
     "underdog_business":    { "channel_id": "1485260692977090662", "model": "zhipu/glm-5" },
-    "overmind_planner":     { "channel_id": "1485518439228375212", "model": "zhipu/glm-5" },
+    "overmind_planner":     { "channel_id": "1485518439228375212", "model": "claude-opus-4-6" },
     "underdog_router":      { "channel_id": "1485518493909778442", "model": "zhipu/glm-5" },
-    "zai_hivemind":         { "channel_id": "1485554709782855804", "model": "zhipu/glm-5" }
+    "zai_hivemind":         { "channel_id": "1485554709782855804", "model": "zhipu/glm-5" },
+    "cf_router":            { "channel_id": "1486023050150543401", "model": "claude-opus-4-6" },
+    "cf_chart_core":        { "channel_id": "1486023052298031124", "model": "claude-opus-4-6" },
+    "cf_data_feed":         { "channel_id": "1486023053963169913", "model": "claude-opus-4-6" },
+    "cf_indicator":         { "channel_id": "1486023055808663604", "model": "claude-opus-4-6" },
+    "cf_drawing":           { "channel_id": "1486023057695965184", "model": "claude-opus-4-6" },
+    "cf_user":              { "channel_id": "1486023059247988787", "model": "claude-opus-4-6" },
+    "cf_storage":           { "channel_id": "1486023061466779668", "model": "claude-opus-4-6" },
+    "cf_tester":            { "channel_id": "1486924418037977189", "model": "claude-sonnet-4-6" },
+    "cf_planner":           { "channel_id": "1486023062687191201", "model": "claude-opus-4-6" }
   }
 }
