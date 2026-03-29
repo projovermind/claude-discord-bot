@@ -39,21 +39,12 @@ function acquireLock() {
     // 기존 lock 파일 확인
     if (fs.existsSync(LOCK_FILE)) {
       const existingPid = parseInt(fs.readFileSync(LOCK_FILE, 'utf-8').trim(), 10);
-      if (existingPid && !isNaN(existingPid)) {
+      if (existingPid && !isNaN(existingPid) && existingPid !== process.pid) {
         try {
           process.kill(existingPid, 0); // 프로세스 존재 여부 확인 (시그널 미전송)
-          // 프로세스가 살아있음 → 이전 인스턴스 강제 종료
-          console.log(`⚠️ 이전 인스턴스 발견 (PID: ${existingPid}), SIGTERM 전송...`);
-          process.kill(existingPid, 'SIGTERM');
-          // gracefulShutdown이 exit(0)할 때까지 대기 (최대 5초)
-          const start = Date.now();
-          while (Date.now() - start < 5000) {
-            try { process.kill(existingPid, 0); } catch { break; }
-            // busy-wait 방지
-            const { execSync: es } = require('child_process');
-            try { es('sleep 0.5', { timeout: 1000 }); } catch {}
-          }
-          console.log(`✅ 이전 인스턴스 (PID: ${existingPid}) 종료 완료`);
+          // 프로세스가 살아있음 → 내가 중복이므로 즉시 종료
+          console.log(`⛔ 이미 실행 중인 인스턴스 있음 (PID: ${existingPid}). 중복 실행 방지 — 종료합니다.`);
+          process.exit(0);
         } catch {
           // 프로세스가 이미 죽어있음 → stale lock
           console.log(`🧹 Stale lock 파일 정리 (PID: ${existingPid} 이미 종료됨)`);
@@ -378,21 +369,11 @@ async function processNextInQueue(channelId) {
   const queue = getQueue(channelId);
   if (queue.length === 0) return;
 
-  // 큐에 쌓인 메시지를 모두 합쳐서 하나의 프롬프트로 전달
-  // → 이전 작업의 세션 컨텍스트를 유지하면서 추가 요청을 참고할 수 있음
-  if (queue.length === 1) {
-    const next = queue.shift();
-    console.log(`📬 큐에서 다음 메시지 처리: ch=${channelId}`);
-    await handleClaude(next.message, '!claude ' + next.prompt);
-  } else {
-    // 여러 메시지가 쌓여 있으면 합쳐서 하나로 전달
-    const items = queue.splice(0, queue.length);
-    const lastMessage = items[items.length - 1].message;  // 마지막 메시지 객체로 응답
-    const mergedPrompt = items.map((q, i) => `[추가 요청 ${i + 1}] ${q.prompt}`).join('\n\n');
-    const contextPrefix = `⚠️ 이전 작업 도중 아래 ${items.length}개의 추가 요청이 들어왔습니다. 이전 작업 결과를 참고하여 순서대로 처리해주세요:\n\n`;
-    console.log(`📬 큐에서 ${items.length}개 메시지 병합 처리: ch=${channelId}`);
-    await handleClaude(lastMessage, '!claude ' + contextPrefix + mergedPrompt);
-  }
+  // 큐에서 하나씩 순차 처리 (병합하지 않음)
+  const next = queue.shift();
+  console.log(`📬 큐에서 다음 메시지 처리 (잔여 ${queue.length}개): ch=${channelId}`);
+  await handleClaude(next.message, '!claude ' + next.prompt);
+  // handleClaude 완료 후 finally에서 다시 processNextInQueue 호출됨
 }
 
 // ── 메시지 중복 처리 방지 (게이트웨이 재전달 대응) ──────
@@ -567,10 +548,12 @@ actions: sendMessage(channel,content), createChannel(name,channelType), deleteCh
   ⚠️ 절대 작업 도중에 봇을 재시작하지 마세요! 반드시 모든 코드 수정이 끝나고, 최종 답변을 보낸 후에만 재시작하세요.
   ⚠️ launchctl bootout은 사용하지 마세요. pkill만 사용하세요.
 - canRestartBot 권한이 없으면: kill, pkill, pgrep, killall, launchctl 등 프로세스 관리 명령어 절대 금지.
-- config.json, .env, .sessions.json, PID 파일 삭제/초기화 금지.
+- ⛔ bot.js, config.json, .env, .sessions.json, PID 파일 수정/삭제/초기화 절대 금지. 봇 인프라 파일은 건드리지 마세요.
 - Claude CLI 명령어(plugin install 등)를 실행할 때는 반드시 \`env -u CLAUDECODE claude ...\`로 실행하세요. CLAUDECODE 환경변수를 제거해야 중첩 실행 차단이 우회됩니다.
 - 대화/인사/안부는 도구 없이 바로 답변.
-- 세션 연속: !reset까지 대화 이어감. "모르겠습니다" 금지.
+- 세션 연속: !reset까지 대화 이어감.
+- 정직함 최우선: 모르면 "모르겠습니다" 또는 "확인이 필요합니다"라고 솔직하게 답한다. 추측으로 그럴듯한 답변을 만들지 않는다. 코드를 직접 읽어 확인할 수 있으면 반드시 확인 후 답한다.
+- 거짓말/환각 금지: 존재하지 않는 파일, 함수, API, 설정을 있는 것처럼 말하지 않는다.
 - 한국어 응답. 영어 질문엔 영어. 코드블록에 언어 태그. Discord 마크다운 활용.`;
 
 // ── 위임 시스템 (위임 가능 에이전트만 주입) ──
@@ -3110,7 +3093,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '3.0.13';
+const BOT_VERSION = '3.0.15';
 
 async function checkForUpdates() {
   const config = loadConfig();
@@ -3339,6 +3322,13 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     });
   } catch {}
 
+  // 도구 라벨 (progressInterval + onToolUse 공유)
+  const TOOL_LABELS_D = {
+    Read: '파일 읽기', Write: '파일 생성', Edit: '코드 수정', Bash: '명령 실행',
+    Grep: '코드 검색', Glob: '파일 탐색', Agent: '서브 에이전트', WebSearch: '웹 검색',
+    WebFetch: '웹 페이지 조회', TodoWrite: '할 일 정리', NotebookEdit: '노트북 편집',
+  };
+
   // 진행 메시지 업데이트 타이머
   let lastEditTime = 0;
   const progressInterval = setInterval(async () => {
@@ -3351,13 +3341,6 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
     const min = Math.floor(elapsed / 60);
     const sec = elapsed % 60;
     const timeStr = min > 0 ? `${min}분 ${sec}초` : `${sec}초`;
-
-    // 혼잣말 + 현재 작업 표시
-    const TOOL_LABELS_D = {
-      Read: '파일 읽기', Write: '파일 생성', Edit: '코드 수정', Bash: '명령 실행',
-      Grep: '코드 검색', Glob: '파일 탐색', Agent: '서브 에이전트', WebSearch: '웹 검색',
-      WebFetch: '웹 페이지 조회', TodoWrite: '할 일 정리', NotebookEdit: '노트북 편집',
-    };
     const lastTool = toolSteps.length > 0 ? toolSteps[toolSteps.length - 1] : null;
     const toolIcon = !lastTool ? '💭' :
                      lastTool.tool === 'Bash' ? '💻' :
@@ -3436,12 +3419,12 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
           return;
         }
       };
-      result = await _runClaudeOnce(task, systemPrompt, targetAgent, delegateSessionId, onToolUse, onProcSpawn, onDelegateText);
+      result = await runClaude(task, systemPrompt, targetAgent, delegateSessionId, onToolUse, onProcSpawn, onDelegateText);
     } catch (err) {
       if (delegateSessionId && (err.isSessionError || err.message?.includes('signature') || err.message?.includes('400'))) {
         console.log(`⚠️ 위임 세션 손상 → 새 세션으로 재시도`);
         if (targetChannelId) clearSession(targetChannelId);
-        result = await _runClaudeOnce(task, systemPrompt, targetAgent, null, onToolUse, onProcSpawn);
+        result = await runClaude(task, systemPrompt, targetAgent, null, onToolUse, onProcSpawn);
       } else {
         throw err;
       }
@@ -3488,9 +3471,14 @@ async function delegateToAgent(sourceAgent, targetAgentId, task, originalMessage
       setSessionId(targetChannelId, result.sessionId);
     }
 
-    // 결과 텍스트 전송
+    // 결과가 또 다른 위임 JSON이면 재위임 처리
     if (result.text) {
-      await sendResponseWithFiles({ channel: workChannel, reply: (c) => workChannel.send(c) }, result.text);
+      const fakeMsg = { channel: workChannel, reply: (c) => workChannel.send(c), guild: originalMessage.guild };
+      const redelegated = await handleDelegation(result.text, fakeMsg);
+      if (!redelegated) {
+        // 위임 JSON이 아니면 일반 텍스트로 전송
+        await sendResponseWithFiles(fakeMsg, result.text);
+      }
     }
     return result;
   } catch (err) {
