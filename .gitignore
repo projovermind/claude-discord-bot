@@ -1,6 +1,11 @@
 node_modules/
 .env
 config.json
+config.json.bak
+# macOS 메타데이터
+._*
+.DS_Store
+._.DS_Store
 .sessions.json
 .update-check
 .bot-update.js
@@ -8,7 +13,21 @@ config.json
 *.pid
 *.log
 *.dat
+*.backup
 Claude-Bot-Installer*.pkg
 Claude-Bot-Installer*.zip
 installer-app/
 bot.js
+# 개발 도구
+.claude/
+.playwright-mcp/
+.zai_history.json
+# 인스톨러 (빌드 결과물)
+"Claude Bot Installer.app/"
+Claude Bot Installer.app/
+Claude-Bot-Installer/
+install-claude-discord-bot.command
+# 스크린샷 (문서용 이미지)
+tv_*.png
+# 패치 노트
+patch-v2.4.md
