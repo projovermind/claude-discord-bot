@@ -329,7 +329,7 @@ const client = new Client({
 
 const MAX_RESPONSE_LENGTH = 1900;
 const MAX_CONCURRENT_PER_CHANNEL = 1;  // 채널당 동시 작업 수 (1 = 순차 + 컨텍스트 합류)
-const MAX_QUEUE_SIZE = 5;           // 채널별 최대 대기열
+const MAX_QUEUE_SIZE = 20;          // 채널별 최대 대기열
 const MESSAGE_DEDUP_TTL = 60000;    // 중복 메시지 무시 (60초)
 const SESSION_TTL = 30 * 60 * 1000; // 세션 만료 (30분)
 const DISCORD_FILE_LIMIT = 10 * 1024 * 1024; // 10MB
@@ -3093,7 +3093,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '3.0.15';
+const BOT_VERSION = '3.0.17';
 
 async function checkForUpdates() {
   const config = loadConfig();
