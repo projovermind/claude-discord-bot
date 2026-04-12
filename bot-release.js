@@ -144,7 +144,7 @@ function rotateZhipuKey() {
 
 function getZhipuBaseUrl() {
   const secrets = loadSecrets();
-  return secrets.zhipu_base_url || 'https://api.z.ai/api/paas/v4/';
+  return secrets.zhipu_base_url || 'https://api.z.ai/api/coding/paas/v4/';
 }
 
 // ZAI_API_KEY가 .env에 없으면 secrets.json에서 주입
@@ -3093,7 +3093,7 @@ CHANGELOG_END*/
 // 또는 로컬 서버: "updateUrl": "http://192.168.x.x:8080/bot.js"
 
 const UPDATE_CHECK_FILE = path.join(__dirname, '.update-check');
-const BOT_VERSION = '3.0.17';
+const BOT_VERSION = '3.0.18';
 
 async function checkForUpdates() {
   const config = loadConfig();
